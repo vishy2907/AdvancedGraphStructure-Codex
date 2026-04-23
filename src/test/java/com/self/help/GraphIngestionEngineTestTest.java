@@ -10,8 +10,7 @@ class GraphIngestionEngineTestTest {
     public void testGraphIngestionEngine() {
         RawDataStore store = new RawDataStore(List.of("fromCity", "fromArea", "toCity", "toArea", "medium"));
         store.ingestRow(new String[]{"Mumbai", null, "Pune", null, "byRoad"});
-        store.ingestRow(new String[]{"Nasik", null, "Pune", null, "byRoad"});
-        store.ingestRow(new String[]{"Pune", null, "Solapur", null, "byRoad"});
+        store.ingestRow(new String[]{"Mumbai", null, "Pune", null, "byRoad"});
 
         NodeSpec fromCity = new NodeSpec("fromCity", null, null);
         NodeSpec toCity = new NodeSpec("toCity", null, null);

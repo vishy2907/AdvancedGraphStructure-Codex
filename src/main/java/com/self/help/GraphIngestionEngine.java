@@ -1,5 +1,7 @@
 package com.self.help;
 
+import org.roaringbitmap.RoaringBitmap;
+
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
@@ -211,44 +213,46 @@ public class GraphIngestionEngine {
     }
 
     public synchronized void ingest(int rowId, RawDataStore dataCube) {
+        int[] numericRowBuffer = encodeNumericRow(rowId, dataCube);
+        int encodedFromId = numericRowBuffer[this.fromIdNumericIndex];
+        int encodedToId = numericRowBuffer[this.toIdNumericIndex];
+        int encodedFromLabel = numericRowBuffer[this.fromLabelNumericIndex];
+        int encodedToLabel = numericRowBuffer[this.toLabelNumericIndex];
+        this.numericRawDataStore.ingestRow(numericRowBuffer);
+        addIndexedRow(rowId, encodedFromId, encodedToId, encodedFromLabel, encodedToLabel, numericRowBuffer);
+    }
+
+    private int[] encodeNumericRow(int rowId, RawDataStore dataCube) {
         int[] numericRowBuffer = new int[this.numericRawDataStore.getColumns().length];
         Arrays.fill(numericRowBuffer, -1);
 
-        String fromIdStr = dataCube.getString(rowId, this.fromIdCubeIndex);
-        String toIdStr = dataCube.getString(rowId, this.toIdCubeIndex);
-        int encodedFromId = this.dictionaryRegistry[this.idDictOffset].getOrEncode(fromIdStr);
-        int encodedToId = this.dictionaryRegistry[this.idDictOffset].getOrEncode(toIdStr);
-        numericRowBuffer[this.fromIdNumericIndex] = encodedFromId;
-        numericRowBuffer[this.toIdNumericIndex] = encodedToId;
-
-        String fromLabelStr = dataCube.getString(rowId, this.fromLabelCubeIndex);
-        String toLabelStr = dataCube.getString(rowId, this.toLabelCubeIndex);
-        int encodedFromLabel = this.dictionaryRegistry[this.labelDictOffset].getOrEncode(fromLabelStr);
-        int encodedToLabel = this.dictionaryRegistry[this.labelDictOffset].getOrEncode(toLabelStr);
-        numericRowBuffer[this.fromLabelNumericIndex] = encodedFromLabel;
-        numericRowBuffer[this.toLabelNumericIndex] = encodedToLabel;
+        encodeCoreValue(rowId, dataCube, this.fromIdCubeIndex, this.idDictOffset, numericRowBuffer, this.fromIdNumericIndex);
+        encodeCoreValue(rowId, dataCube, this.toIdCubeIndex, this.idDictOffset, numericRowBuffer, this.toIdNumericIndex);
+        encodeCoreValue(rowId, dataCube, this.fromLabelCubeIndex, this.labelDictOffset, numericRowBuffer, this.fromLabelNumericIndex);
+        encodeCoreValue(rowId, dataCube, this.toLabelCubeIndex, this.labelDictOffset, numericRowBuffer, this.toLabelNumericIndex);
 
         for (int i = 0; i < this.fromAttrCubeIndices.length; i++) {
             int dictAddress = this.attrDictBaseOffset + i;
-
-            String fromAttrStr = dataCube.getString(rowId, this.fromAttrCubeIndices[i]);
-            int encodedFromAttr = this.dictionaryRegistry[dictAddress].getOrEncode(fromAttrStr);
-            numericRowBuffer[this.fromAttrNumericIndices[i]] = encodedFromAttr;
-
-            String toAttrStr = dataCube.getString(rowId, this.toAttrCubeIndices[i]);
-            int encodedToAttr = this.dictionaryRegistry[dictAddress].getOrEncode(toAttrStr);
-            numericRowBuffer[this.toAttrNumericIndices[i]] = encodedToAttr;
+            encodeCoreValue(rowId, dataCube, this.fromAttrCubeIndices[i], dictAddress, numericRowBuffer, this.fromAttrNumericIndices[i]);
+            encodeCoreValue(rowId, dataCube, this.toAttrCubeIndices[i], dictAddress, numericRowBuffer, this.toAttrNumericIndices[i]);
         }
 
         for (int j = 0; j < this.relationCubeIndices.length; j++) {
-            int dictAddress = this.relDictBaseOffset + j;
-            String relStr = dataCube.getString(rowId, this.relationCubeIndices[j]);
-            int encodedRel = this.dictionaryRegistry[dictAddress].getOrEncode(relStr);
-            numericRowBuffer[this.relationNumericIndices[j]] = encodedRel;
+            encodeCoreValue(rowId, dataCube, this.relationCubeIndices[j], this.relDictBaseOffset + j, numericRowBuffer, this.relationNumericIndices[j]);
         }
 
-        this.numericRawDataStore.ingestRow(numericRowBuffer);
-        addIndexedRow(rowId, encodedFromId, encodedToId, encodedFromLabel, encodedToLabel, numericRowBuffer);
+        return numericRowBuffer;
+    }
+
+    private void encodeCoreValue(int rowId,
+                                 RawDataStore dataCube,
+                                 int cubeIndex,
+                                 int dictAddress,
+                                 int[] numericRowBuffer,
+                                 int numericIndex) {
+        String rawValue = dataCube.getString(rowId, cubeIndex);
+        int encodedValue = this.dictionaryRegistry[dictAddress].getOrEncode(rawValue);
+        numericRowBuffer[numericIndex] = encodedValue;
     }
 
     private void addIndexedRow(int rowId,
@@ -257,22 +261,128 @@ public class GraphIngestionEngine {
                                int encodedFromLabel,
                                int encodedToLabel,
                                int[] numericRowBuffer) {
+        Integer duplicateRowId = findIndexedDuplicateRowId(
+                encodedFromId, encodedToId, encodedFromLabel, encodedToLabel, numericRowBuffer
+        );
+        if (duplicateRowId != null) {
+            removeIndexedRow(duplicateRowId, numericRowBuffer);
+        }
+
         this.fromInvertedIndexRegistry[0].add(encodedFromId, rowId);
         this.toInvertedIndexRegistry[0].add(encodedToId, rowId);
         this.fromInvertedIndexRegistry[1].add(encodedFromLabel, rowId);
         this.toInvertedIndexRegistry[1].add(encodedToLabel, rowId);
 
         for (int i = 0; i < this.fromAttrCubeIndices.length; i++) {
-            int nodeIndexAddress = 2 + i;
-            int encodedFromAttr = numericRowBuffer[this.fromAttrNumericIndices[i]];
-            int encodedToAttr = numericRowBuffer[this.toAttrNumericIndices[i]];
-            this.fromInvertedIndexRegistry[nodeIndexAddress].add(encodedFromAttr, rowId);
-            this.toInvertedIndexRegistry[nodeIndexAddress].add(encodedToAttr, rowId);
+            updateNodeAttributeIndex(i, numericRowBuffer, rowId, true);
         }
 
         for (int j = 0; j < this.relationCubeIndices.length; j++) {
-            int encodedRel = numericRowBuffer[this.relationNumericIndices[j]];
-            this.relationInvertedIndexRegistry[j].add(encodedRel, rowId);
+            updateRelationIndex(j, numericRowBuffer, rowId, true);
         }
+    }
+
+    private Integer findIndexedDuplicateRowId(int encodedFromId,
+                                              int encodedToId,
+                                              int encodedFromLabel,
+                                              int encodedToLabel,
+                                              int[] numericRowBuffer) {
+        RoaringBitmap candidateRows = this.fromInvertedIndexRegistry[0].copyRowsForValueOrNull(encodedFromId);
+        if (candidateRows == null) {
+            return null;
+        }
+
+        if (!this.toInvertedIndexRegistry[0].intersectInto(candidateRows, encodedToId)) {
+            return null;
+        }
+
+        if (!this.fromInvertedIndexRegistry[1].intersectInto(candidateRows, encodedFromLabel)) {
+            return null;
+        }
+
+        if (!this.toInvertedIndexRegistry[1].intersectInto(candidateRows, encodedToLabel)) {
+            return null;
+        }
+
+        for (int i = 0; i < this.fromAttrCubeIndices.length; i++) {
+            if (!intersectNodeAttributeDuplicate(i, numericRowBuffer, candidateRows)) {
+                return null;
+            }
+        }
+
+        for (int j = 0; j < this.relationCubeIndices.length; j++) {
+            if (!this.relationInvertedIndexRegistry[j].intersectInto(candidateRows, numericRowBuffer[this.relationNumericIndices[j]])) {
+                return null;
+            }
+        }
+
+        if (candidateRows.getCardinality() > 1) {
+            throw new IllegalStateException("Expected at most one indexed duplicate, but found " +
+                    candidateRows.getCardinality());
+        }
+
+        for (int duplicateRowId : candidateRows) {
+            return duplicateRowId;
+        }
+        return null;
+    }
+
+    private boolean intersectNodeAttributeDuplicate(int attributeIndex,
+                                                    int[] numericRowBuffer,
+                                                    RoaringBitmap candidateRows) {
+        int nodeIndexAddress = 2 + attributeIndex;
+        return this.fromInvertedIndexRegistry[nodeIndexAddress].intersectInto(
+                candidateRows, numericRowBuffer[this.fromAttrNumericIndices[attributeIndex]]
+        ) && this.toInvertedIndexRegistry[nodeIndexAddress].intersectInto(
+                candidateRows, numericRowBuffer[this.toAttrNumericIndices[attributeIndex]]
+        );
+    }
+
+    private void removeIndexedRow(int duplicateRowId, int[] numericRowBuffer) {
+        int encodedFromId = numericRowBuffer[this.fromIdNumericIndex];
+        int encodedToId = numericRowBuffer[this.toIdNumericIndex];
+        int encodedFromLabel = numericRowBuffer[this.fromLabelNumericIndex];
+        int encodedToLabel = numericRowBuffer[this.toLabelNumericIndex];
+
+        this.fromInvertedIndexRegistry[0].remove(encodedFromId, duplicateRowId);
+        this.toInvertedIndexRegistry[0].remove(encodedToId, duplicateRowId);
+        this.fromInvertedIndexRegistry[1].remove(encodedFromLabel, duplicateRowId);
+        this.toInvertedIndexRegistry[1].remove(encodedToLabel, duplicateRowId);
+
+        for (int i = 0; i < this.fromAttrCubeIndices.length; i++) {
+            updateNodeAttributeIndex(i, numericRowBuffer, duplicateRowId, false);
+        }
+
+        for (int j = 0; j < this.relationCubeIndices.length; j++) {
+            updateRelationIndex(j, numericRowBuffer, duplicateRowId, false);
+        }
+    }
+
+    private void updateNodeAttributeIndex(int attributeIndex,
+                                          int[] numericRowBuffer,
+                                          int rowId,
+                                          boolean add) {
+        int nodeIndexAddress = 2 + attributeIndex;
+        int encodedFromAttr = numericRowBuffer[this.fromAttrNumericIndices[attributeIndex]];
+        int encodedToAttr = numericRowBuffer[this.toAttrNumericIndices[attributeIndex]];
+        updateIndex(this.fromInvertedIndexRegistry[nodeIndexAddress], encodedFromAttr, rowId, add);
+        updateIndex(this.toInvertedIndexRegistry[nodeIndexAddress], encodedToAttr, rowId, add);
+    }
+
+    private void updateRelationIndex(int relationIndex, int[] numericRowBuffer, int rowId, boolean add) {
+        updateIndex(
+                this.relationInvertedIndexRegistry[relationIndex],
+                numericRowBuffer[this.relationNumericIndices[relationIndex]],
+                rowId,
+                add
+        );
+    }
+
+    private static void updateIndex(InvertedIndexColumn indexColumn, int encodedValue, int rowId, boolean add) {
+        if (add) {
+            indexColumn.add(encodedValue, rowId);
+            return;
+        }
+        indexColumn.remove(encodedValue, rowId);
     }
 }

@@ -46,6 +46,27 @@ class InvertedIndexColumn {
         return bitmaps[dictId];
     }
 
+    public RoaringBitmap getRowsForValueOrNull(int dictId) {
+        if (dictId < 0 || dictId >= bitmaps.length) {
+            return null;
+        }
+        return bitmaps[dictId];
+    }
+
+    public RoaringBitmap copyRowsForValueOrNull(int dictId) {
+        RoaringBitmap bitmap = getRowsForValueOrNull(dictId);
+        return bitmap == null ? null : bitmap.clone();
+    }
+
+    public boolean intersectInto(RoaringBitmap candidateRows, int dictId) {
+        RoaringBitmap bitmap = getRowsForValueOrNull(dictId);
+        if (bitmap == null) {
+            return false;
+        }
+        candidateRows.and(bitmap);
+        return !candidateRows.isEmpty();
+    }
+
     public void add(int encodedFromId, int rowId) {
         addRowToValue(encodedFromId, rowId);
     }
