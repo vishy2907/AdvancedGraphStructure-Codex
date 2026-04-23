@@ -4,10 +4,12 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
 class GraphIngestionEngineTestTest {
 
     @Test
-    public void testGraphIngestionEngine() {
+    public void testGraphIngestionEngineReturnsOnlyValidRows() {
         RawDataStore store = new RawDataStore(List.of("fromCity", "fromArea", "toCity", "toArea", "medium"));
         store.ingestRow(new String[]{"Mumbai", null, "Pune", null, "byRoad"});
         store.ingestRow(new String[]{"Mumbai", null, "Pune", null, "byRoad"});
@@ -20,7 +22,6 @@ class GraphIngestionEngineTestTest {
         for (int i = 0; i < store.getSize(); i++) {
             engine.ingest(i, store);
         }
-        System.out.println(engine);
+        assertEquals(List.of("[Mumbai, Mumbai, Pune, Pune, byRoad]"), engine.getValidRows());
     }
-
 }

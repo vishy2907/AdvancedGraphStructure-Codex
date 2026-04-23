@@ -3,6 +3,7 @@ package com.self.help;
 import org.roaringbitmap.RoaringBitmap;
 
 import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -51,9 +52,13 @@ public class GraphIngestionEngine {
     private final InvertedIndexColumn[] relationInvertedIndexRegistry;
 
     private final NumericRawDataStore numericRawDataStore;
+    private final RawDataStore sourceDataStore;
+    private final RoaringBitmap deletedRowFrom = new RoaringBitmap();
+    private final RoaringBitmap deletedRowTo = new RoaringBitmap();
 
     public GraphIngestionEngine(RawDataStore dataCube, MappingSpec spec) {
         validateSpec(dataCube, spec);
+        this.sourceDataStore = dataCube;
 
         NodeSpec fromSpec = spec.getFromNodeSpec();
         NodeSpec toSpec = spec.getToNodeSpec();
@@ -265,6 +270,7 @@ public class GraphIngestionEngine {
                 encodedFromId, encodedToId, encodedFromLabel, encodedToLabel, numericRowBuffer
         );
         if (duplicateRowId != null) {
+            tombstoneRow(duplicateRowId);
             removeIndexedRow(duplicateRowId, numericRowBuffer);
         }
 
@@ -304,6 +310,11 @@ public class GraphIngestionEngine {
             return null;
         }
 
+        excludeDeletedRows(candidateRows);
+        if (candidateRows.isEmpty()) {
+            return null;
+        }
+
         for (int i = 0; i < this.fromAttrCubeIndices.length; i++) {
             if (!intersectNodeAttributeDuplicate(i, numericRowBuffer, candidateRows)) {
                 return null;
@@ -327,6 +338,16 @@ public class GraphIngestionEngine {
         return null;
     }
 
+    private void excludeDeletedRows(RoaringBitmap candidateRows) {
+        candidateRows.andNot(getFullyDeletedRows());
+    }
+
+    private RoaringBitmap getFullyDeletedRows() {
+        RoaringBitmap fullyDeletedRows = this.deletedRowFrom.clone();
+        fullyDeletedRows.and(this.deletedRowTo);
+        return fullyDeletedRows;
+    }
+
     private boolean intersectNodeAttributeDuplicate(int attributeIndex,
                                                     int[] numericRowBuffer,
                                                     RoaringBitmap candidateRows) {
@@ -336,6 +357,11 @@ public class GraphIngestionEngine {
         ) && this.toInvertedIndexRegistry[nodeIndexAddress].intersectInto(
                 candidateRows, numericRowBuffer[this.toAttrNumericIndices[attributeIndex]]
         );
+    }
+
+    private void tombstoneRow(int rowId) {
+        this.deletedRowFrom.add(rowId);
+        this.deletedRowTo.add(rowId);
     }
 
     private void removeIndexedRow(int duplicateRowId, int[] numericRowBuffer) {
@@ -356,6 +382,44 @@ public class GraphIngestionEngine {
         for (int j = 0; j < this.relationCubeIndices.length; j++) {
             updateRelationIndex(j, numericRowBuffer, duplicateRowId, false);
         }
+    }
+
+    public synchronized List<String> getValidRows() {
+        List<String> validRows = new ArrayList<>();
+        RoaringBitmap fullyDeletedRows = getFullyDeletedRows();
+
+        for (int rowId = 0; rowId < this.numericRawDataStore.getSize(); rowId++) {
+            if (fullyDeletedRows.contains(rowId)) {
+                continue;
+            }
+            validRows.add(Arrays.toString(buildMappedRow(rowId)));
+        }
+
+        return validRows;
+    }
+
+    private String[] buildMappedRow(int rowId) {
+        int mappedColumnCount = 2 + this.fromAttrCubeIndices.length + 2 + this.toAttrCubeIndices.length + this.relationCubeIndices.length;
+        String[] mappedRow = new String[mappedColumnCount];
+        int index = 0;
+
+        mappedRow[index++] = this.sourceDataStore.getString(rowId, this.fromIdCubeIndex);
+        mappedRow[index++] = this.sourceDataStore.getString(rowId, this.fromLabelCubeIndex);
+        for (int fromAttrCubeIndex : this.fromAttrCubeIndices) {
+            mappedRow[index++] = this.sourceDataStore.getString(rowId, fromAttrCubeIndex);
+        }
+
+        mappedRow[index++] = this.sourceDataStore.getString(rowId, this.toIdCubeIndex);
+        mappedRow[index++] = this.sourceDataStore.getString(rowId, this.toLabelCubeIndex);
+        for (int toAttrCubeIndex : this.toAttrCubeIndices) {
+            mappedRow[index++] = this.sourceDataStore.getString(rowId, toAttrCubeIndex);
+        }
+
+        for (int relationCubeIndex : this.relationCubeIndices) {
+            mappedRow[index++] = this.sourceDataStore.getString(rowId, relationCubeIndex);
+        }
+
+        return mappedRow;
     }
 
     private void updateNodeAttributeIndex(int attributeIndex,
