@@ -76,5 +76,8 @@ class InvertedIndexColumn {
             return;
         }
         bitmaps[dictId].remove(rowId);
+        if (bitmaps[dictId].isEmpty()) {
+            bitmaps[dictId] = null;
+        }
     }
 }

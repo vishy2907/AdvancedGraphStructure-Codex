@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 class GraphIngestionEngineTestTest {
 
@@ -22,6 +23,17 @@ class GraphIngestionEngineTestTest {
         for (int i = 0; i < store.getSize(); i++) {
             engine.ingest(i, store);
         }
-        assertEquals(List.of("[Mumbai, Mumbai, Pune, Pune, byRoad]"), engine.getValidRows());
+
+        assertEquals(List.of("[Mumbai, Pune, byRoad]"), engine.getValidRows());
+    }
+
+    @Test
+    public void testInvertedIndexColumnNullifiesEmptyBitmapAfterRemove() {
+        InvertedIndexColumn indexColumn = new InvertedIndexColumn();
+
+        indexColumn.add(3, 99);
+        indexColumn.remove(3, 99);
+
+        assertNull(indexColumn.getRowsForValueOrNull(3));
     }
 }

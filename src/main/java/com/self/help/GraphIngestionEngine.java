@@ -339,13 +339,19 @@ public class GraphIngestionEngine {
     }
 
     private void excludeDeletedRows(RoaringBitmap candidateRows) {
-        candidateRows.andNot(getFullyDeletedRows());
+        candidateRows.andNot(getIndexExcludedRows());
     }
 
     private RoaringBitmap getFullyDeletedRows() {
         RoaringBitmap fullyDeletedRows = this.deletedRowFrom.clone();
         fullyDeletedRows.and(this.deletedRowTo);
         return fullyDeletedRows;
+    }
+
+    private RoaringBitmap getIndexExcludedRows() {
+        RoaringBitmap indexExcludedRows = this.deletedRowFrom.clone();
+        indexExcludedRows.or(this.deletedRowTo);
+        return indexExcludedRows;
     }
 
     private boolean intersectNodeAttributeDuplicate(int attributeIndex,
@@ -386,40 +392,59 @@ public class GraphIngestionEngine {
 
     public synchronized List<String> getValidRows() {
         List<String> validRows = new ArrayList<>();
-        RoaringBitmap fullyDeletedRows = getFullyDeletedRows();
 
         for (int rowId = 0; rowId < this.numericRawDataStore.getSize(); rowId++) {
-            if (fullyDeletedRows.contains(rowId)) {
+            boolean fromDeleted = this.deletedRowFrom.contains(rowId);
+            boolean toDeleted = this.deletedRowTo.contains(rowId);
+            if (fromDeleted && toDeleted) {
                 continue;
             }
-            validRows.add(Arrays.toString(buildMappedRow(rowId)));
+            validRows.add(Arrays.toString(buildMappedRow(rowId, fromDeleted, toDeleted)));
         }
 
         return validRows;
     }
 
-    private String[] buildMappedRow(int rowId) {
-        int mappedColumnCount = 2 + this.fromAttrCubeIndices.length + 2 + this.toAttrCubeIndices.length + this.relationCubeIndices.length;
-        String[] mappedRow = new String[mappedColumnCount];
-        int index = 0;
+    private String[] buildMappedRow(int rowId, boolean fromDeleted, boolean toDeleted) {
+        List<String> mappedRow = new ArrayList<>(getMappedColumnCount());
+        appendNodeValues(mappedRow, rowId, fromDeleted, this.fromIdCubeIndex, this.fromLabelCubeIndex, this.fromAttrCubeIndices);
+        appendNodeValues(mappedRow, rowId, toDeleted, this.toIdCubeIndex, this.toLabelCubeIndex, this.toAttrCubeIndices);
 
-        mappedRow[index++] = this.sourceDataStore.getString(rowId, this.fromIdCubeIndex);
-        mappedRow[index++] = this.sourceDataStore.getString(rowId, this.fromLabelCubeIndex);
-        for (int fromAttrCubeIndex : this.fromAttrCubeIndices) {
-            mappedRow[index++] = this.sourceDataStore.getString(rowId, fromAttrCubeIndex);
-        }
-
-        mappedRow[index++] = this.sourceDataStore.getString(rowId, this.toIdCubeIndex);
-        mappedRow[index++] = this.sourceDataStore.getString(rowId, this.toLabelCubeIndex);
-        for (int toAttrCubeIndex : this.toAttrCubeIndices) {
-            mappedRow[index++] = this.sourceDataStore.getString(rowId, toAttrCubeIndex);
-        }
-
+        boolean relationDeleted = fromDeleted || toDeleted;
         for (int relationCubeIndex : this.relationCubeIndices) {
-            mappedRow[index++] = this.sourceDataStore.getString(rowId, relationCubeIndex);
+            mappedRow.add(relationDeleted ? null : this.sourceDataStore.getString(rowId, relationCubeIndex));
         }
 
-        return mappedRow;
+        return mappedRow.toArray(new String[0]);
+    }
+
+    private int getMappedColumnCount() {
+        return getNodeColumnCount(this.fromIdCubeIndex, this.fromLabelCubeIndex, this.fromAttrCubeIndices)
+                + getNodeColumnCount(this.toIdCubeIndex, this.toLabelCubeIndex, this.toAttrCubeIndices)
+                + this.relationCubeIndices.length;
+    }
+
+    private int getNodeColumnCount(int idCubeIndex, int labelCubeIndex, int[] attrCubeIndices) {
+        int labelColumnCount = idCubeIndex == labelCubeIndex ? 0 : 1;
+        return 1 + labelColumnCount + attrCubeIndices.length;
+    }
+
+    private void appendNodeValues(List<String> mappedRow,
+                                  int rowId,
+                                  boolean nodeDeleted,
+                                  int idCubeIndex,
+                                  int labelCubeIndex,
+                                  int[] attrCubeIndices) {
+        boolean hasDistinctLabel = idCubeIndex != labelCubeIndex;
+
+        mappedRow.add(nodeDeleted ? null : this.sourceDataStore.getString(rowId, idCubeIndex));
+        if (hasDistinctLabel) {
+            mappedRow.add(nodeDeleted ? null : this.sourceDataStore.getString(rowId, labelCubeIndex));
+        }
+
+        for (int attrCubeIndex : attrCubeIndices) {
+            mappedRow.add(nodeDeleted ? null : this.sourceDataStore.getString(rowId, attrCubeIndex));
+        }
     }
 
     private void updateNodeAttributeIndex(int attributeIndex,
