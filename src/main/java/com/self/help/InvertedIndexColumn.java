@@ -49,4 +49,11 @@ class InvertedIndexColumn {
     public void add(int encodedFromId, int rowId) {
         addRowToValue(encodedFromId, rowId);
     }
+
+    public void remove(int dictId, int rowId) {
+        if (dictId < 0 || dictId >= bitmaps.length || bitmaps[dictId] == null) {
+            return;
+        }
+        bitmaps[dictId].remove(rowId);
+    }
 }
