@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -25,7 +26,7 @@ public class GraphIngestionEngine {
     private final int[] relationCubeIndices;
 
     // ==========================================
-    // PHASE 1B: NUMERIC STORE INDICES
+    // PHASE 1B: ENCODED BUFFER INDICES
     // ==========================================
     private final int fromIdNumericIndex;
     private final int toIdNumericIndex;
@@ -51,10 +52,11 @@ public class GraphIngestionEngine {
     private final InvertedIndexColumn[] toInvertedIndexRegistry;
     private final InvertedIndexColumn[] relationInvertedIndexRegistry;
 
-    private final NumericRawDataStore numericRawDataStore;
+    private final int encodedColumnCount;
     private final RawDataStore sourceDataStore;
     private final RoaringBitmap deletedRowFrom = new RoaringBitmap();
     private final RoaringBitmap deletedRowTo = new RoaringBitmap();
+    private int ingestedRowCount;
 
     public GraphIngestionEngine(RawDataStore dataCube, MappingSpec spec) {
         validateSpec(dataCube, spec);
@@ -139,7 +141,7 @@ public class GraphIngestionEngine {
             this.relationInvertedIndexRegistry[i] = new InvertedIndexColumn();
         }
 
-        this.numericRawDataStore = new NumericRawDataStore(List.copyOf(numericColumnIndexMap.keySet()));
+        this.encodedColumnCount = numericColumnIndexMap.size();
     }
 
     private static void validateSpec(RawDataStore dataCube, MappingSpec spec) {
@@ -218,17 +220,20 @@ public class GraphIngestionEngine {
     }
 
     public synchronized void ingest(int rowId, RawDataStore dataCube) {
+        if (rowId != this.ingestedRowCount) {
+            throw new IllegalArgumentException("Row ids must be ingested sequentially starting at 0.");
+        }
         int[] numericRowBuffer = encodeNumericRow(rowId, dataCube);
         int encodedFromId = numericRowBuffer[this.fromIdNumericIndex];
         int encodedToId = numericRowBuffer[this.toIdNumericIndex];
         int encodedFromLabel = numericRowBuffer[this.fromLabelNumericIndex];
         int encodedToLabel = numericRowBuffer[this.toLabelNumericIndex];
-        this.numericRawDataStore.ingestRow(numericRowBuffer);
         addIndexedRow(rowId, encodedFromId, encodedToId, encodedFromLabel, encodedToLabel, numericRowBuffer);
+        this.ingestedRowCount++;
     }
 
     private int[] encodeNumericRow(int rowId, RawDataStore dataCube) {
-        int[] numericRowBuffer = new int[this.numericRawDataStore.getColumns().length];
+        int[] numericRowBuffer = new int[this.encodedColumnCount];
         Arrays.fill(numericRowBuffer, -1);
 
         encodeCoreValue(rowId, dataCube, this.fromIdCubeIndex, this.idDictOffset, numericRowBuffer, this.fromIdNumericIndex);
@@ -266,14 +271,6 @@ public class GraphIngestionEngine {
                                int encodedFromLabel,
                                int encodedToLabel,
                                int[] numericRowBuffer) {
-        Integer duplicateRowId = findIndexedDuplicateRowId(
-                encodedFromId, encodedToId, encodedFromLabel, encodedToLabel, numericRowBuffer
-        );
-        if (duplicateRowId != null) {
-            tombstoneRow(duplicateRowId);
-            removeIndexedRow(duplicateRowId, numericRowBuffer);
-        }
-
         this.fromInvertedIndexRegistry[0].add(encodedFromId, rowId);
         this.toInvertedIndexRegistry[0].add(encodedToId, rowId);
         this.fromInvertedIndexRegistry[1].add(encodedFromLabel, rowId);
@@ -288,118 +285,30 @@ public class GraphIngestionEngine {
         }
     }
 
-    private Integer findIndexedDuplicateRowId(int encodedFromId,
-                                              int encodedToId,
-                                              int encodedFromLabel,
-                                              int encodedToLabel,
-                                              int[] numericRowBuffer) {
-        RoaringBitmap candidateRows = this.fromInvertedIndexRegistry[0].copyRowsForValueOrNull(encodedFromId);
-        if (candidateRows == null) {
-            return null;
-        }
-
-        if (!this.toInvertedIndexRegistry[0].intersectInto(candidateRows, encodedToId)) {
-            return null;
-        }
-
-        if (!this.fromInvertedIndexRegistry[1].intersectInto(candidateRows, encodedFromLabel)) {
-            return null;
-        }
-
-        if (!this.toInvertedIndexRegistry[1].intersectInto(candidateRows, encodedToLabel)) {
-            return null;
-        }
-
-        excludeDeletedRows(candidateRows);
-        if (candidateRows.isEmpty()) {
-            return null;
-        }
-
-        for (int i = 0; i < this.fromAttrCubeIndices.length; i++) {
-            if (!intersectNodeAttributeDuplicate(i, numericRowBuffer, candidateRows)) {
-                return null;
-            }
-        }
-
-        for (int j = 0; j < this.relationCubeIndices.length; j++) {
-            if (!this.relationInvertedIndexRegistry[j].intersectInto(candidateRows, numericRowBuffer[this.relationNumericIndices[j]])) {
-                return null;
-            }
-        }
-
-        if (candidateRows.getCardinality() > 1) {
-            throw new IllegalStateException("Expected at most one indexed duplicate, but found " +
-                    candidateRows.getCardinality());
-        }
-
-        for (int duplicateRowId : candidateRows) {
-            return duplicateRowId;
-        }
-        return null;
-    }
-
-    private void excludeDeletedRows(RoaringBitmap candidateRows) {
-        candidateRows.andNot(getIndexExcludedRows());
-    }
-
-    private RoaringBitmap getFullyDeletedRows() {
-        RoaringBitmap fullyDeletedRows = this.deletedRowFrom.clone();
-        fullyDeletedRows.and(this.deletedRowTo);
-        return fullyDeletedRows;
-    }
-
-    private RoaringBitmap getIndexExcludedRows() {
-        RoaringBitmap indexExcludedRows = this.deletedRowFrom.clone();
-        indexExcludedRows.or(this.deletedRowTo);
-        return indexExcludedRows;
-    }
-
-    private boolean intersectNodeAttributeDuplicate(int attributeIndex,
-                                                    int[] numericRowBuffer,
-                                                    RoaringBitmap candidateRows) {
-        int nodeIndexAddress = 2 + attributeIndex;
-        return this.fromInvertedIndexRegistry[nodeIndexAddress].intersectInto(
-                candidateRows, numericRowBuffer[this.fromAttrNumericIndices[attributeIndex]]
-        ) && this.toInvertedIndexRegistry[nodeIndexAddress].intersectInto(
-                candidateRows, numericRowBuffer[this.toAttrNumericIndices[attributeIndex]]
-        );
-    }
-
-    private void tombstoneRow(int rowId) {
+    void markDeletedFrom(int rowId) {
         this.deletedRowFrom.add(rowId);
-        this.deletedRowTo.add(rowId);
     }
 
-    private void removeIndexedRow(int duplicateRowId, int[] numericRowBuffer) {
-        int encodedFromId = numericRowBuffer[this.fromIdNumericIndex];
-        int encodedToId = numericRowBuffer[this.toIdNumericIndex];
-        int encodedFromLabel = numericRowBuffer[this.fromLabelNumericIndex];
-        int encodedToLabel = numericRowBuffer[this.toLabelNumericIndex];
-
-        this.fromInvertedIndexRegistry[0].remove(encodedFromId, duplicateRowId);
-        this.toInvertedIndexRegistry[0].remove(encodedToId, duplicateRowId);
-        this.fromInvertedIndexRegistry[1].remove(encodedFromLabel, duplicateRowId);
-        this.toInvertedIndexRegistry[1].remove(encodedToLabel, duplicateRowId);
-
-        for (int i = 0; i < this.fromAttrCubeIndices.length; i++) {
-            updateNodeAttributeIndex(i, numericRowBuffer, duplicateRowId, false);
-        }
-
-        for (int j = 0; j < this.relationCubeIndices.length; j++) {
-            updateRelationIndex(j, numericRowBuffer, duplicateRowId, false);
-        }
+    void markDeletedTo(int rowId) {
+        this.deletedRowTo.add(rowId);
     }
 
     public synchronized List<String> getValidRows() {
         List<String> validRows = new ArrayList<>();
+        Set<List<String>> seenProjectedRows = new LinkedHashSet<>();
 
-        for (int rowId = 0; rowId < this.numericRawDataStore.getSize(); rowId++) {
+        for (int rowId = 0; rowId < this.ingestedRowCount; rowId++) {
             boolean fromDeleted = this.deletedRowFrom.contains(rowId);
             boolean toDeleted = this.deletedRowTo.contains(rowId);
             if (fromDeleted && toDeleted) {
                 continue;
             }
-            validRows.add(Arrays.toString(buildMappedRow(rowId, fromDeleted, toDeleted)));
+
+            String[] mappedRow = buildMappedRow(rowId, fromDeleted, toDeleted);
+            List<String> projectedRowKey = new ArrayList<>(Arrays.asList(mappedRow));
+            if (seenProjectedRows.add(projectedRowKey)) {
+                validRows.add(Arrays.toString(mappedRow));
+            }
         }
 
         return validRows;
