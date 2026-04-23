@@ -1,7 +1,10 @@
 package com.self.help;
 
 import org.junit.jupiter.api.Test;
+import org.roaringbitmap.IntIterator;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -9,8 +12,17 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 
 class GraphIngestionEngineTestTest {
 
+    private static List<String> collectValidRows(GraphIngestionEngine engine) {
+        List<String> validRows = new ArrayList<>();
+        IntIterator rowIds = engine.getValidRowIds();
+        while (rowIds.hasNext()) {
+            validRows.add(Arrays.toString(engine.getRow(rowIds.next())));
+        }
+        return validRows;
+    }
+
     @Test
-    public void testGraphIngestionEngineReturnsOnlyValidRows() {
+    public void testGraphIngestionEngineReturnsAllValidRowsIncludingDuplicates() {
         RawDataStore store = new RawDataStore(List.of("fromCity", "fromArea", "toCity", "toArea", "medium"));
         store.ingestRow(new String[]{"Mumbai", null, "Pune", null, "byRoad"});
         store.ingestRow(new String[]{"Mumbai", null, "Pune", null, "byRoad"});
@@ -24,7 +36,10 @@ class GraphIngestionEngineTestTest {
             engine.ingest(i, store);
         }
 
-        assertEquals(List.of("[Mumbai, Pune, byRoad]"), engine.getValidRows());
+        assertEquals(
+                List.of("[Mumbai, Pune, byRoad]", "[Mumbai, Pune, byRoad]"),
+                collectValidRows(engine)
+        );
     }
 
     @Test
@@ -40,11 +55,11 @@ class GraphIngestionEngineTestTest {
         engine.ingest(0, store);
         engine.markDeletedFrom(0);
 
-        assertEquals(List.of("[null, null, Pune, katraj, null]"), engine.getValidRows());
+        assertEquals(List.of("[null, null, Pune, katraj, null]"), collectValidRows(engine));
     }
 
     @Test
-    public void testProjectedDuplicatesAreCollapsedAfterPartialDeletion() {
+    public void testProjectedDuplicatesAreReturnedAfterPartialDeletion() {
         RawDataStore store = new RawDataStore(List.of("fromCity", "fromArea", "toCity", "toArea", "medium"));
         store.ingestRow(new String[]{"Mumbai", "kurla", "Pune", "katraj", "byRoad"});
         store.ingestRow(new String[]{"Mumbai", "kurla", "Pune", "katraj", "byRoad"});
@@ -59,7 +74,10 @@ class GraphIngestionEngineTestTest {
         engine.markDeletedFrom(0);
         engine.markDeletedFrom(1);
 
-        assertEquals(List.of("[null, null, Pune, katraj, null]"), engine.getValidRows());
+        assertEquals(
+                List.of("[null, null, Pune, katraj, null]", "[null, null, Pune, katraj, null]"),
+                collectValidRows(engine)
+        );
     }
 
     @Test
@@ -79,7 +97,7 @@ class GraphIngestionEngineTestTest {
 
         assertEquals(
                 List.of("[null, null, Pune, katraj, null]", "[Mumbai, kurla, Pune, katraj, byRoad]"),
-                engine.getValidRows()
+                collectValidRows(engine)
         );
     }
 

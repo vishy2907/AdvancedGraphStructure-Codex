@@ -1,5 +1,6 @@
 package com.self.help;
 
+import org.roaringbitmap.IntIterator;
 import org.roaringbitmap.RoaringBitmap;
 
 import java.util.Arrays;
@@ -7,7 +8,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -277,11 +277,11 @@ public class GraphIngestionEngine {
         this.toInvertedIndexRegistry[1].add(encodedToLabel, rowId);
 
         for (int i = 0; i < this.fromAttrCubeIndices.length; i++) {
-            updateNodeAttributeIndex(i, numericRowBuffer, rowId, true);
+            updateNodeAttributeIndex(i, numericRowBuffer, rowId);
         }
 
         for (int j = 0; j < this.relationCubeIndices.length; j++) {
-            updateRelationIndex(j, numericRowBuffer, rowId, true);
+            updateRelationIndex(j, numericRowBuffer, rowId);
         }
     }
 
@@ -293,25 +293,36 @@ public class GraphIngestionEngine {
         this.deletedRowTo.add(rowId);
     }
 
-    public synchronized List<String> getValidRows() {
-        List<String> validRows = new ArrayList<>();
-        Set<List<String>> seenProjectedRows = new LinkedHashSet<>();
+    public synchronized IntIterator getValidRowIds() {
+        RoaringBitmap validRowIds = new RoaringBitmap();
 
         for (int rowId = 0; rowId < this.ingestedRowCount; rowId++) {
             boolean fromDeleted = this.deletedRowFrom.contains(rowId);
             boolean toDeleted = this.deletedRowTo.contains(rowId);
-            if (fromDeleted && toDeleted) {
-                continue;
-            }
-
-            String[] mappedRow = buildMappedRow(rowId, fromDeleted, toDeleted);
-            List<String> projectedRowKey = new ArrayList<>(Arrays.asList(mappedRow));
-            if (seenProjectedRows.add(projectedRowKey)) {
-                validRows.add(Arrays.toString(mappedRow));
+            if (!(fromDeleted && toDeleted)) {
+                validRowIds.add(rowId);
             }
         }
 
-        return validRows;
+        return validRowIds.getIntIterator();
+    }
+
+    public synchronized String[] getRow(int rowId) {
+        return getProjectedRowOrNull(rowId);
+    }
+
+    private String[] getProjectedRowOrNull(int rowId) {
+        if (rowId < 0 || rowId >= this.ingestedRowCount) {
+            return null;
+        }
+
+        boolean fromDeleted = this.deletedRowFrom.contains(rowId);
+        boolean toDeleted = this.deletedRowTo.contains(rowId);
+        if (fromDeleted && toDeleted) {
+            return null;
+        }
+
+        return buildMappedRow(rowId, fromDeleted, toDeleted);
     }
 
     private String[] buildMappedRow(int rowId, boolean fromDeleted, boolean toDeleted) {
@@ -358,29 +369,23 @@ public class GraphIngestionEngine {
 
     private void updateNodeAttributeIndex(int attributeIndex,
                                           int[] numericRowBuffer,
-                                          int rowId,
-                                          boolean add) {
+                                          int rowId) {
         int nodeIndexAddress = 2 + attributeIndex;
         int encodedFromAttr = numericRowBuffer[this.fromAttrNumericIndices[attributeIndex]];
         int encodedToAttr = numericRowBuffer[this.toAttrNumericIndices[attributeIndex]];
-        updateIndex(this.fromInvertedIndexRegistry[nodeIndexAddress], encodedFromAttr, rowId, add);
-        updateIndex(this.toInvertedIndexRegistry[nodeIndexAddress], encodedToAttr, rowId, add);
+        updateIndex(this.fromInvertedIndexRegistry[nodeIndexAddress], encodedFromAttr, rowId);
+        updateIndex(this.toInvertedIndexRegistry[nodeIndexAddress], encodedToAttr, rowId);
     }
 
-    private void updateRelationIndex(int relationIndex, int[] numericRowBuffer, int rowId, boolean add) {
+    private void updateRelationIndex(int relationIndex, int[] numericRowBuffer, int rowId) {
         updateIndex(
                 this.relationInvertedIndexRegistry[relationIndex],
                 numericRowBuffer[this.relationNumericIndices[relationIndex]],
-                rowId,
-                add
+                rowId
         );
     }
 
-    private static void updateIndex(InvertedIndexColumn indexColumn, int encodedValue, int rowId, boolean add) {
-        if (add) {
-            indexColumn.add(encodedValue, rowId);
-            return;
-        }
-        indexColumn.remove(encodedValue, rowId);
+    private static void updateIndex(InvertedIndexColumn indexColumn, int encodedValue, int rowId) {
+        indexColumn.add(encodedValue, rowId);
     }
 }
