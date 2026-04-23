@@ -7,6 +7,7 @@ import java.util.*;
 
 @Data
 public class RawDataStore {
+    private final @NotNull List<String> columnNames;
     int size;
     final Map<String, Integer> columnNameToIndexMap = new LinkedHashMap<>();
     final List<String>[] columns;
@@ -15,12 +16,13 @@ public class RawDataStore {
      *
      * @param columnNames
      */
-    public RawDataStore(@NotNull String[] columnNames) {
-        columns = new List[columnNames.length];
-        for (int index = 0; index < columnNames.length; index++) {
-            columnNameToIndexMap.putIfAbsent(columnNames[index], columnNameToIndexMap.size());
+    public RawDataStore(@NotNull List<String> columnNames) {
+        columns = new List[columnNames.size()];
+        for (int index = 0; index < columnNames.size(); index++) {
+            columnNameToIndexMap.putIfAbsent(columnNames.get(index), columnNameToIndexMap.size());
             columns[index] = new ArrayList<String>();
         }
+        this.columnNames = columnNames;
     }
 
     public synchronized int ingestRow(@NotNull String[] values) {

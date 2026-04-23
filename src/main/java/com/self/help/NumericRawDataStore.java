@@ -15,11 +15,11 @@ public class NumericRawDataStore {
      *
      * @param columnNames
      */
-    public NumericRawDataStore(@NotNull String[] columnNames) {
-        columns = new List[columnNames.length];
-        for (int index = 0; index < columnNames.length; index++) {
-            columnNameToIndexMap.putIfAbsent(columnNames[index], columnNameToIndexMap.size());
-            columns[index] = new ArrayList<Integer>();
+    public NumericRawDataStore(@NotNull List<String> columnNames) {
+        columns = new List[columnNames.size()];
+        for (int index = 0; index < columnNames.size(); index++) {
+            columnNameToIndexMap.putIfAbsent(columnNames.get(index), columnNameToIndexMap.size());
+            columns[index] = new ArrayList<>();
         }
     }
 

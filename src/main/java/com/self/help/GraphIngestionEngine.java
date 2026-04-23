@@ -1,6 +1,7 @@
 package com.self.help;
 
 import java.util.Collections;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -37,13 +38,8 @@ public class GraphIngestionEngine {
     private final InvertedIndexColumn[] toInvertedIndexRegistry;
     private final InvertedIndexColumn[] relationInvertedIndexRegistry;
 
-    // ==========================================
-    // PHASE 4: ZERO-ALLOCATION HANDOFF BUFFERS
-    // ==========================================
-    private final int[] fromAttrBuffer;
-    private final int[] toAttrBuffer;
-    private final int[] relationBuffer;
 
+    private final NumericRawDataStore numericRawDataStore;
     public GraphIngestionEngine(RawDataStore dataCube, MappingSpec spec) {
 
         // --- 0. THE FAIL-FAST VALIDATION GATE ---
@@ -114,16 +110,14 @@ public class GraphIngestionEngine {
             this.relationInvertedIndexRegistry[i] = new InvertedIndexColumn();
         }
 
-        // --- 4. BUFFER ALLOCATION ---
-        this.fromAttrBuffer = new int[attrSize];
-        this.toAttrBuffer = new int[attrSize];
-        this.relationBuffer = new int[relSize];
+        numericRawDataStore = new NumericRawDataStore(dataCube.getColumnNames());
     }
 
     // ==========================================
     // ISOLATED VALIDATION ENGINE
     // ==========================================
     private static void validateSpec(RawDataStore dataCube, MappingSpec spec) {
+
         NodeSpec fromSpec = spec.getFromNodeSpec();
         NodeSpec toSpec = spec.getToNodeSpec();
 
@@ -180,6 +174,8 @@ public class GraphIngestionEngine {
     // THE HOT LOOP: ZERO BRANCHES, ZERO ALLOCATIONS
     // ==========================================
     public synchronized void ingest(int rowId, RawDataStore dataCube) {
+        int[] numericRowBuffer = new int[dataCube.getColumnNames().size()];
+        Arrays.fill(numericRowBuffer, -1);
 
         // --- 1. ID Encoding & Indexing ---
         String fromIdStr = dataCube.getString(rowId, this.fromIdCubeIndex);
@@ -187,6 +183,8 @@ public class GraphIngestionEngine {
 
         int encodedFromId = this.dictionaryRegistry[this.idDictOffset].getOrEncode(fromIdStr);
         int encodedToId = this.dictionaryRegistry[this.idDictOffset].getOrEncode(toIdStr);
+        numericRowBuffer[this.fromIdCubeIndex] = encodedFromId;
+        numericRowBuffer[this.toIdCubeIndex] = encodedToId;
 
         this.fromInvertedIndexRegistry[0].add(encodedFromId, rowId);
         this.toInvertedIndexRegistry[0].add(encodedToId, rowId);
@@ -197,6 +195,8 @@ public class GraphIngestionEngine {
 
         int encodedFromLabel = this.dictionaryRegistry[this.labelDictOffset].getOrEncode(fromLabelStr);
         int encodedToLabel = this.dictionaryRegistry[this.labelDictOffset].getOrEncode(toLabelStr);
+        numericRowBuffer[this.fromLabelCubeIndex] = encodedFromLabel;
+        numericRowBuffer[this.toLabelCubeIndex] = encodedToLabel;
 
         this.fromInvertedIndexRegistry[1].add(encodedFromLabel, rowId);
         this.toInvertedIndexRegistry[1].add(encodedToLabel, rowId);
@@ -209,13 +209,13 @@ public class GraphIngestionEngine {
             // From Side
             String fromAttrStr = dataCube.getString(rowId, this.fromAttrCubeIndices[i]);
             int encodedFromAttr = this.dictionaryRegistry[dictAddress].getOrEncode(fromAttrStr);
-            this.fromAttrBuffer[i] = encodedFromAttr;
+            numericRowBuffer[this.fromAttrCubeIndices[i]] = encodedFromAttr;
             this.fromInvertedIndexRegistry[nodeIndexAddress].add(encodedFromAttr, encodedFromId);
 
             // To Side
             String toAttrStr = dataCube.getString(rowId, this.toAttrCubeIndices[i]);
             int encodedToAttr = this.dictionaryRegistry[dictAddress].getOrEncode(toAttrStr);
-            this.toAttrBuffer[i] = encodedToAttr;
+            numericRowBuffer[this.toAttrCubeIndices[i]] = encodedToAttr;
             this.toInvertedIndexRegistry[nodeIndexAddress].add(encodedToAttr, rowId);
         }
 
@@ -225,18 +225,12 @@ public class GraphIngestionEngine {
 
             String relStr = dataCube.getString(rowId, this.relationCubeIndices[j]);
             int encodedRel = this.dictionaryRegistry[dictAddress].getOrEncode(relStr);
-            this.relationBuffer[j] = encodedRel;
+            numericRowBuffer[this.relationCubeIndices[j]] = encodedRel;
 
             // Direct array access 'j' for relations (Zero waste array alignment)
             this.relationInvertedIndexRegistry[j].add(encodedRel, rowId);
         }
 
-       /* // --- 5. Downstream Handoff ---
-        graphEngine.addEdge(
-                encodedFromId, encodedToId,
-                encodedFromLabel, encodedToLabel,
-                this.fromAttrBuffer, this.toAttrBuffer,
-                this.relationBuffer
-        );*/
+        this.numericRawDataStore.ingestRow(numericRowBuffer);
     }
 }

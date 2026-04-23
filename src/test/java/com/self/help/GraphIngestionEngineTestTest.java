@@ -4,13 +4,11 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
-import static org.junit.jupiter.api.Assertions.*;
-
 class GraphIngestionEngineTestTest {
 
     @Test
     public void testGraphIngestionEngine() {
-        RawDataStore store = new RawDataStore(new String[]{"fromCity","toCity", "medium"});
+        RawDataStore store = new RawDataStore(List.of("fromCity","toCity", "medium"));
         store.ingestRow(new String[]{"Mumbai", "Pune", "byRoad"});
         store.ingestRow(new String[]{"Nasik", "Pune", "byRoad"});
         store.ingestRow(new String[]{"Pune", "Solapur", "byRoad"});
