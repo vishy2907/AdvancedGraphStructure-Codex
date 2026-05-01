@@ -12,6 +12,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+/**
+ * Ingests rows from a raw column store into a graph-oriented index structure.
+ * The engine treats each ingested row as an edge with a from-node side, a
+ * to-node side, and optional relation columns. During ingestion it dictionary
+ * encodes mapped values and updates RoaringBitmap-backed inverted indexes while
+ * keeping the legacy {@link RawDataStore} as the source for row projection.
+ */
 public class GraphIngestionEngine {
 
     // ==========================================

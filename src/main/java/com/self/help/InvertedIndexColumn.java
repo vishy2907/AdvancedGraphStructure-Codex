@@ -2,6 +2,11 @@ package com.self.help;
 
 import org.roaringbitmap.RoaringBitmap;
 
+/**
+ * Stores one inverted index column from encoded dictionary values to row ids.
+ * Each dictionary id owns a RoaringBitmap containing rows that have that value,
+ * allowing fast candidate-row lookup and intersection for selective filters.
+ */
 class InvertedIndexColumn {
     // Array index = Dict ID from Dictionary
     // Value = Bitmap of Row IDs

@@ -4,23 +4,28 @@ import org.jetbrains.annotations.NotNull;
 
 import java.util.List;
 
+/**
+ * Describes how raw source columns should be interpreted as graph edges.
+ * The mapping contains the from-node specification, the to-node specification,
+ * and relation columns that belong to the edge between those node sides.
+ */
 public record MappingSpec(@NotNull NodeSpec fromNodeSpec, @NotNull NodeSpec toNodeSpec, @NotNull List<String> relations) {
-    @NotNull
     /**
      * Returns the source-column mapping for the edge's from-node side.
      *
      * @return from-node mapping
      */
+    @NotNull
     public NodeSpec getFromNodeSpec() {
         return fromNodeSpec;
     }
 
-    @NotNull
     /**
      * Returns the source-column mapping for the edge's to-node side.
      *
      * @return to-node mapping
      */
+    @NotNull
     public NodeSpec getToNodeSpec() {
         return toNodeSpec;
     }

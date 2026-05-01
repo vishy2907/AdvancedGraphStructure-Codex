@@ -5,6 +5,12 @@ import org.jetbrains.annotations.NotNull;
 
 import java.util.*;
 
+/**
+ * Simple legacy-friendly columnar store for raw string data.
+ * Values are appended row-by-row but stored as one list per source column, which
+ * lets the graph engine read individual mapped columns without reconstructing
+ * full rows during ingestion and projection.
+ */
 @Data
 public class RawDataStore {
     private final @NotNull List<String> columnNames;

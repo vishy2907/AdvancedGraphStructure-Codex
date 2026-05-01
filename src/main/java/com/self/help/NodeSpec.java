@@ -7,6 +7,11 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 
+/**
+ * Describes how one node side of an edge is mapped from raw source columns.
+ * A node has an id column, a label column, and zero or more attribute columns.
+ * If no label column is supplied, the id column also acts as the label column.
+ */
 public record NodeSpec(@NotNull String idColumnName, @Nullable String labelColumnName, @Nullable List<String> attributes) {
     /**
      * Creates a node mapping from raw source columns.
@@ -23,22 +28,22 @@ public record NodeSpec(@NotNull String idColumnName, @Nullable String labelColum
         this.attributes = Objects.requireNonNullElse(attributes, Collections.emptyList());
     }
 
-    @NotNull
     /**
      * Returns the source column used as the node label.
      *
      * @return label column name, defaulting to the id column name when no label was supplied
      */
+    @NotNull
     public String getLabelColumnName() {
         return labelColumnName;
     }
 
-    @NotNull
     /**
      * Returns the source column used as the node id.
      *
      * @return id column name
      */
+    @NotNull
     public String getIdColumnName() {
         return idColumnName;
     }

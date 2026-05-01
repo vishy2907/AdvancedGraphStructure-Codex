@@ -5,6 +5,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Maintains a stable two-way mapping between raw string values and dense
+ * integer ids. The graph engine uses these ids as compact values for bitmap
+ * indexes while still being able to hydrate ids back to strings when needed.
+ */
 class BiDirectionalDictionary {
     // String to ID for Ingestion
     private Map<String, Integer> valueToId = new ConcurrentHashMap<>();
