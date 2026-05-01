@@ -2,17 +2,10 @@ package com.self.help;
 
 import org.roaringbitmap.IntIterator;
 
-import java.util.ArrayDeque;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Iterator;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
-import java.util.Queue;
-import java.util.Set;
 
 /**
  * Iterates over the currently valid projected rows of a {@link GraphIngestionEngine}.
@@ -91,41 +84,16 @@ public class GraphEngineIterator implements Iterator<String[]> {
 
     /**
      * Builds directed in/out degree statistics for all currently visible nodes.
-     * This method uses a fresh valid-row snapshot and does not consume the
-     * iterator's current position. Edges are traversed breadth-first across all
-     * graph components; rows with only one visible endpoint still contribute a
-     * node entry, but not an edge count.
+     * This method does not consume the iterator's current position. The engine
+     * caches the computed statistics until ingestion or deletion changes the
+     * graph, then rebuilds them by breadth-first traversal across all graph
+     * components. Rows with only one visible endpoint still contribute a node
+     * entry, but not an edge count.
      *
      * @return node id to directed degree statistics, ordered by first visible row appearance
      */
     public Map<String, GraphNodeStat> getGraphStatistics() {
-        Map<String, List<String>> adjacency = new LinkedHashMap<>();
-        Map<String, GraphNodeStat> statistics = new LinkedHashMap<>();
-        IntIterator rowIds = this.engine.getValidRowIds();
-
-        while (rowIds.hasNext()) {
-            String[] nodeIds = this.engine.getVisibleNodeIds(rowIds.next());
-            if (nodeIds == null) {
-                continue;
-            }
-
-            String fromNodeId = nodeIds[0];
-            String toNodeId = nodeIds[1];
-            if (fromNodeId != null) {
-                statistics.computeIfAbsent(fromNodeId, ignored -> new GraphNodeStat());
-                adjacency.computeIfAbsent(fromNodeId, ignored -> new ArrayList<>());
-            }
-            if (toNodeId != null) {
-                statistics.computeIfAbsent(toNodeId, ignored -> new GraphNodeStat());
-                adjacency.computeIfAbsent(toNodeId, ignored -> new ArrayList<>());
-            }
-            if (fromNodeId != null && toNodeId != null) {
-                adjacency.get(fromNodeId).add(toNodeId);
-            }
-        }
-
-        populateDegreesWithBreadthFirstTraversal(adjacency, statistics);
-        return statistics;
+        return this.engine.getGraphStatistics();
     }
 
     private void prepareNext() {
@@ -158,28 +126,4 @@ public class GraphEngineIterator implements Iterator<String[]> {
         this.preparedRow = null;
     }
 
-    private void populateDegreesWithBreadthFirstTraversal(Map<String, List<String>> adjacency,
-                                                          Map<String, GraphNodeStat> statistics) {
-        Set<String> visited = new LinkedHashSet<>();
-        Queue<String> queue = new ArrayDeque<>();
-
-        for (String startNodeId : statistics.keySet()) {
-            if (!visited.add(startNodeId)) {
-                continue;
-            }
-
-            queue.add(startNodeId);
-            while (!queue.isEmpty()) {
-                String currentNodeId = queue.remove();
-                GraphNodeStat currentStat = statistics.get(currentNodeId);
-                for (String targetNodeId : adjacency.getOrDefault(currentNodeId, List.of())) {
-                    currentStat.incrementOutDegree();
-                    statistics.get(targetNodeId).incrementInDegree();
-                    if (visited.add(targetNodeId)) {
-                        queue.add(targetNodeId);
-                    }
-                }
-            }
-        }
-    }
 }

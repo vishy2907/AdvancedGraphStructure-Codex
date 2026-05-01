@@ -3,23 +3,26 @@ package com.self.help;
 import org.roaringbitmap.IntIterator;
 import org.roaringbitmap.RoaringBitmap;
 
+import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
 import java.util.Set;
 
 /**
  * Ingests rows from a raw column store into a graph-oriented index structure.
  * The engine treats each ingested row as an edge with a from-node side, a
  * to-node side, and optional relation columns. During ingestion it dictionary
- * encodes mapped values and updates RoaringBitmap-backed inverted indexes while
- * keeping the legacy {@link RawDataStore} as the source for row projection.
+ * encodes mapped values, stores them in a numerical sidecar, and updates
+ * RoaringBitmap-backed inverted indexes.
  */
-public class GraphIngestionEngine implements Iterable<String[]> {
+public class GraphIngestionEngine {
 
     // ==========================================
     // PHASE 1: PRE-COMPUTED DATACUBE INDICES
@@ -44,33 +47,39 @@ public class GraphIngestionEngine implements Iterable<String[]> {
     private final int[] relationNumericIndices;
 
     // ==========================================
-    // PHASE 2: DETERMINISTIC REGISTRY OFFSETS
+    // PHASE 2: HOT INDEX MAPPINGS
     // ==========================================
-    private final int idDictOffset;
-    private final int labelDictOffset;
-    private final int attrDictBaseOffset;
-    private final int relDictBaseOffset;
+    private final int idDictionaryIndex;
+    private final int labelDictionaryIndex;
+    private final int[] attributeDictionaryIndices;
+    private final int[] relationDictionaryIndices;
 
     // ==========================================
-    // PHASE 3: PARALLEL REGISTRIES
+    // PHASE 3: ENGINE INDEX BLOCKS
     // ==========================================
     private final BiDirectionalDictionary[] dictionaryRegistry;
-    private final InvertedIndexColumn[] fromInvertedIndexRegistry;
-    private final InvertedIndexColumn[] toInvertedIndexRegistry;
-    private final InvertedIndexColumn[] relationInvertedIndexRegistry;
+    private final NodeIndexBlock fromNodeIndexes;
+    private final NodeIndexBlock toNodeIndexes;
+    private final RelationIndexBlock relationIndexes;
 
     private final int encodedColumnCount;
+    private final int mappedColumnCount;
+    private final int iteratorMappedColumnCount;
     private final NumericalRowStore numericalRowStore;
-    private final RawDataStore sourceDataStore;
+    private final RoaringBitmap allRowIds = new RoaringBitmap();
     private final RoaringBitmap deletedRowFrom = new RoaringBitmap();
     private final RoaringBitmap deletedRowTo = new RoaringBitmap();
+    private final RoaringBitmap fullyDeletedRowIds = new RoaringBitmap();
+    private Map<String, GraphNodeStat> graphStatisticsCache = Collections.emptyMap();
     private int ingestedRowCount;
+    private long graphVersion;
+    private long graphStatisticsVersion = -1L;
 
     /**
      * Builds an ingestion engine for the supplied raw column store and mapping.
-     * The mapping is validated up front, and all source column positions,
-     * dictionary offsets, and inverted-index registries are precomputed so row
-     * ingestion does not need repeated column-name lookups.
+     * The mapping is validated up front, and all source column positions, index
+     * mappings, and engine-owned registries are precomputed so row ingestion
+     * does not need repeated column-name lookups.
      *
      * @param dataCube raw source store that owns the string columns
      * @param spec graph mapping that identifies from-node, to-node, and relation columns
@@ -79,7 +88,6 @@ public class GraphIngestionEngine implements Iterable<String[]> {
      */
     public GraphIngestionEngine(RawDataStore dataCube, MappingSpec spec) {
         validateSpec(dataCube, spec);
-        this.sourceDataStore = dataCube;
 
         NodeSpec fromSpec = spec.getFromNodeSpec();
         NodeSpec toSpec = spec.getToNodeSpec();
@@ -108,60 +116,46 @@ public class GraphIngestionEngine implements Iterable<String[]> {
             this.relationCubeIndices[i] = dataCube.getColumnIndex(relations.get(i));
         }
 
-        LinkedHashMap<String, Integer> numericColumnIndexMap = new LinkedHashMap<>();
-        this.fromIdNumericIndex = registerNumericColumn(numericColumnIndexMap, fromSpec.getIdColumnName());
-        this.toIdNumericIndex = registerNumericColumn(numericColumnIndexMap, toSpec.getIdColumnName());
-        this.fromLabelNumericIndex = registerNumericColumn(numericColumnIndexMap, fromSpec.getLabelColumnName());
-        this.toLabelNumericIndex = registerNumericColumn(numericColumnIndexMap, toSpec.getLabelColumnName());
+        int currentNumericIndex = 0;
+        this.fromIdNumericIndex = currentNumericIndex++;
+        this.toIdNumericIndex = currentNumericIndex++;
+        this.fromLabelNumericIndex = currentNumericIndex++;
+        this.toLabelNumericIndex = currentNumericIndex++;
 
         this.fromAttrNumericIndices = new int[attrSize];
         this.toAttrNumericIndices = new int[attrSize];
         for (int i = 0; i < attrSize; i++) {
-            this.fromAttrNumericIndices[i] = registerNumericColumn(numericColumnIndexMap, fromAttrs.get(i));
-            this.toAttrNumericIndices[i] = registerNumericColumn(numericColumnIndexMap, toAttrs.get(i));
+            this.fromAttrNumericIndices[i] = currentNumericIndex++;
+            this.toAttrNumericIndices[i] = currentNumericIndex++;
         }
 
         this.relationNumericIndices = new int[relSize];
         for (int i = 0; i < relSize; i++) {
-            this.relationNumericIndices[i] = registerNumericColumn(numericColumnIndexMap, relations.get(i));
+            this.relationNumericIndices[i] = currentNumericIndex++;
         }
 
-        int currentDictOffset = 0;
-        int nodePropertyCount = 0;
+        GraphIndexStore indexStore = new GraphIndexStore(attrSize, relSize);
+        this.idDictionaryIndex = indexStore.idDictionaryIndex();
+        this.labelDictionaryIndex = indexStore.labelDictionaryIndex();
+        this.attributeDictionaryIndices = indexStore.attributeDictionaryIndices();
+        this.relationDictionaryIndices = indexStore.relationDictionaryIndices();
 
-        this.idDictOffset = currentDictOffset++;
-        nodePropertyCount++;
-
-        this.labelDictOffset = currentDictOffset++;
-        nodePropertyCount++;
-
-        this.attrDictBaseOffset = currentDictOffset;
-        currentDictOffset += attrSize;
-        nodePropertyCount += attrSize;
-
-        this.relDictBaseOffset = currentDictOffset;
-        currentDictOffset += relSize;
-
-        this.dictionaryRegistry = new BiDirectionalDictionary[currentDictOffset];
-        this.fromInvertedIndexRegistry = new InvertedIndexColumn[nodePropertyCount];
-        this.toInvertedIndexRegistry = new InvertedIndexColumn[nodePropertyCount];
-        this.relationInvertedIndexRegistry = new InvertedIndexColumn[relSize];
-
-        for (int i = 0; i < currentDictOffset; i++) {
-            this.dictionaryRegistry[i] = new BiDirectionalDictionary();
-        }
-
-        for (int i = 0; i < nodePropertyCount; i++) {
-            this.fromInvertedIndexRegistry[i] = new InvertedIndexColumn();
-            this.toInvertedIndexRegistry[i] = new InvertedIndexColumn();
-        }
-
-        for (int i = 0; i < relSize; i++) {
-            this.relationInvertedIndexRegistry[i] = new InvertedIndexColumn();
-        }
-
-        this.encodedColumnCount = numericColumnIndexMap.size();
+        this.dictionaryRegistry = createDictionaryRegistry(indexStore.dictionaryCount());
+        this.fromNodeIndexes = new NodeIndexBlock(attrSize);
+        this.toNodeIndexes = new NodeIndexBlock(attrSize);
+        this.relationIndexes = new RelationIndexBlock(relSize);
+        this.encodedColumnCount = currentNumericIndex;
+        this.mappedColumnCount = computeMappedColumnCount();
+        this.iteratorMappedColumnCount = computeIteratorMappedColumnCount();
         this.numericalRowStore = new NumericalRowStore(this.encodedColumnCount);
+    }
+
+    private static BiDirectionalDictionary[] createDictionaryRegistry(int dictionaryCount) {
+        BiDirectionalDictionary[] dictionaries = new BiDirectionalDictionary[dictionaryCount];
+        for (int i = 0; i < dictionaries.length; i++) {
+            dictionaries[i] = new BiDirectionalDictionary();
+        }
+        return dictionaries;
     }
 
     private static void validateSpec(RawDataStore dataCube, MappingSpec spec) {
@@ -229,16 +223,6 @@ public class GraphIngestionEngine implements Iterable<String[]> {
         }
     }
 
-    private static int registerNumericColumn(Map<String, Integer> numericColumnIndexMap, String columnName) {
-        Integer existingIndex = numericColumnIndexMap.get(columnName);
-        if (existingIndex != null) {
-            return existingIndex;
-        }
-        int newIndex = numericColumnIndexMap.size();
-        numericColumnIndexMap.put(columnName, newIndex);
-        return newIndex;
-    }
-
     /**
      * Encodes and indexes one raw row as a graph edge.
      * Rows must be ingested in strict ascending order starting at {@code 0};
@@ -253,13 +237,11 @@ public class GraphIngestionEngine implements Iterable<String[]> {
             throw new IllegalArgumentException("Row ids must be ingested sequentially starting at 0.");
         }
         int[] numericRowBuffer = encodeNumericRow(rowId, dataCube);
-        int encodedFromId = numericRowBuffer[this.fromIdNumericIndex];
-        int encodedToId = numericRowBuffer[this.toIdNumericIndex];
-        int encodedFromLabel = numericRowBuffer[this.fromLabelNumericIndex];
-        int encodedToLabel = numericRowBuffer[this.toLabelNumericIndex];
         this.numericalRowStore.appendRow(rowId, numericRowBuffer);
-        addIndexedRow(rowId, encodedFromId, encodedToId, encodedFromLabel, encodedToLabel, numericRowBuffer);
+        addIndexedRow(rowId, numericRowBuffer);
+        this.allRowIds.add(rowId);
         this.ingestedRowCount++;
+        this.graphVersion++;
     }
 
     /**
@@ -277,61 +259,69 @@ public class GraphIngestionEngine implements Iterable<String[]> {
         int[] numericRowBuffer = new int[this.encodedColumnCount];
         Arrays.fill(numericRowBuffer, -1);
 
-        encodeCoreValue(rowId, dataCube, this.fromIdCubeIndex, this.idDictOffset, numericRowBuffer, this.fromIdNumericIndex);
-        encodeCoreValue(rowId, dataCube, this.toIdCubeIndex, this.idDictOffset, numericRowBuffer, this.toIdNumericIndex);
-        encodeCoreValue(rowId, dataCube, this.fromLabelCubeIndex, this.labelDictOffset, numericRowBuffer, this.fromLabelNumericIndex);
-        encodeCoreValue(rowId, dataCube, this.toLabelCubeIndex, this.labelDictOffset, numericRowBuffer, this.toLabelNumericIndex);
+        numericRowBuffer[this.fromIdNumericIndex] = encodeValue(this.idDictionaryIndex, dataCube.getString(rowId, this.fromIdCubeIndex));
+        numericRowBuffer[this.toIdNumericIndex] = encodeValue(this.idDictionaryIndex, dataCube.getString(rowId, this.toIdCubeIndex));
+        numericRowBuffer[this.fromLabelNumericIndex] = encodeValue(this.labelDictionaryIndex, dataCube.getString(rowId, this.fromLabelCubeIndex));
+        numericRowBuffer[this.toLabelNumericIndex] = encodeValue(this.labelDictionaryIndex, dataCube.getString(rowId, this.toLabelCubeIndex));
 
         for (int i = 0; i < this.fromAttrCubeIndices.length; i++) {
-            int dictAddress = this.attrDictBaseOffset + i;
-            encodeCoreValue(rowId, dataCube, this.fromAttrCubeIndices[i], dictAddress, numericRowBuffer, this.fromAttrNumericIndices[i]);
-            encodeCoreValue(rowId, dataCube, this.toAttrCubeIndices[i], dictAddress, numericRowBuffer, this.toAttrNumericIndices[i]);
+            int dictionaryIndex = this.attributeDictionaryIndices[i];
+            numericRowBuffer[this.fromAttrNumericIndices[i]] = encodeValue(dictionaryIndex, dataCube.getString(rowId, this.fromAttrCubeIndices[i]));
+            numericRowBuffer[this.toAttrNumericIndices[i]] = encodeValue(dictionaryIndex, dataCube.getString(rowId, this.toAttrCubeIndices[i]));
         }
 
         for (int j = 0; j < this.relationCubeIndices.length; j++) {
-            encodeCoreValue(rowId, dataCube, this.relationCubeIndices[j], this.relDictBaseOffset + j, numericRowBuffer, this.relationNumericIndices[j]);
+            numericRowBuffer[this.relationNumericIndices[j]] = encodeValue(this.relationDictionaryIndices[j], dataCube.getString(rowId, this.relationCubeIndices[j]));
         }
 
         return numericRowBuffer;
     }
 
-    private void encodeCoreValue(int rowId,
-                                 RawDataStore dataCube,
-                                 int cubeIndex,
-                                 int dictAddress,
-                                 int[] numericRowBuffer,
-                                 int numericIndex) {
-        String rawValue = dataCube.getString(rowId, cubeIndex);
-        int encodedValue = this.dictionaryRegistry[dictAddress].getOrEncode(rawValue);
-        numericRowBuffer[numericIndex] = encodedValue;
+    private int encodeValue(int dictionaryIndex, String rawValue) {
+        return this.dictionaryRegistry[dictionaryIndex].getOrEncode(rawValue);
     }
 
-    private void addIndexedRow(int rowId,
-                               int encodedFromId,
-                               int encodedToId,
-                               int encodedFromLabel,
-                               int encodedToLabel,
-                               int[] numericRowBuffer) {
-        this.fromInvertedIndexRegistry[0].add(encodedFromId, rowId);
-        this.toInvertedIndexRegistry[0].add(encodedToId, rowId);
-        this.fromInvertedIndexRegistry[1].add(encodedFromLabel, rowId);
-        this.toInvertedIndexRegistry[1].add(encodedToLabel, rowId);
+    private void addIndexedRow(int rowId, int[] numericRowBuffer) {
+        this.fromNodeIndexes.idIndex().add(numericRowBuffer[this.fromIdNumericIndex], rowId);
+        this.toNodeIndexes.idIndex().add(numericRowBuffer[this.toIdNumericIndex], rowId);
+        this.fromNodeIndexes.labelIndex().add(numericRowBuffer[this.fromLabelNumericIndex], rowId);
+        this.toNodeIndexes.labelIndex().add(numericRowBuffer[this.toLabelNumericIndex], rowId);
 
-        for (int i = 0; i < this.fromAttrCubeIndices.length; i++) {
-            updateNodeAttributeIndex(i, numericRowBuffer, rowId);
+        for (int i = 0; i < this.fromAttrNumericIndices.length; i++) {
+            this.fromNodeIndexes.attributeIndex(i).add(numericRowBuffer[this.fromAttrNumericIndices[i]], rowId);
+            this.toNodeIndexes.attributeIndex(i).add(numericRowBuffer[this.toAttrNumericIndices[i]], rowId);
         }
 
-        for (int j = 0; j < this.relationCubeIndices.length; j++) {
-            updateRelationIndex(j, numericRowBuffer, rowId);
+        for (int i = 0; i < this.relationNumericIndices.length; i++) {
+            this.relationIndexes.relationIndex(i).add(numericRowBuffer[this.relationNumericIndices[i]], rowId);
         }
     }
 
-    void markDeletedFrom(int rowId) {
+    synchronized void markDeletedFrom(int rowId) {
+        boolean alreadyDeleted = this.deletedRowFrom.contains(rowId);
         this.deletedRowFrom.add(rowId);
+        updateFullyDeletedRow(rowId);
+        if (!alreadyDeleted) {
+            this.graphVersion++;
+        }
     }
 
-    void markDeletedTo(int rowId) {
+    synchronized void markDeletedTo(int rowId) {
+        boolean alreadyDeleted = this.deletedRowTo.contains(rowId);
         this.deletedRowTo.add(rowId);
+        updateFullyDeletedRow(rowId);
+        if (!alreadyDeleted) {
+            this.graphVersion++;
+        }
+    }
+
+    private void updateFullyDeletedRow(int rowId) {
+        if (this.deletedRowFrom.contains(rowId) && this.deletedRowTo.contains(rowId)) {
+            this.fullyDeletedRowIds.add(rowId);
+            return;
+        }
+
+        this.fullyDeletedRowIds.remove(rowId);
     }
 
     /**
@@ -342,16 +332,8 @@ public class GraphIngestionEngine implements Iterable<String[]> {
      * @return iterator over valid row ids in ascending order
      */
     public synchronized IntIterator getValidRowIds() {
-        RoaringBitmap validRowIds = new RoaringBitmap();
-
-        for (int rowId = 0; rowId < this.ingestedRowCount; rowId++) {
-            boolean fromDeleted = this.deletedRowFrom.contains(rowId);
-            boolean toDeleted = this.deletedRowTo.contains(rowId);
-            if (!(fromDeleted && toDeleted)) {
-                validRowIds.add(rowId);
-            }
-        }
-
+        RoaringBitmap validRowIds = this.allRowIds.clone();
+        validRowIds.andNot(this.fullyDeletedRowIds);
         return validRowIds.getIntIterator();
     }
 
@@ -363,8 +345,7 @@ public class GraphIngestionEngine implements Iterable<String[]> {
      *
      * @return custom graph engine iterator over projected rows
      */
-    @Override
-    public GraphEngineIterator iterator() {
+    public GraphEngineIterator graphIterator() {
         return new GraphEngineIterator(this);
     }
 
@@ -395,7 +376,7 @@ public class GraphIngestionEngine implements Iterable<String[]> {
         return buildIteratorRow(rowId, fromDeleted, toDeleted);
     }
 
-    synchronized String[] getVisibleNodeIds(int rowId) {
+    synchronized int[] getVisibleEncodedNodeIds(int rowId) {
         if (rowId < 0 || rowId >= this.ingestedRowCount) {
             return null;
         }
@@ -406,10 +387,92 @@ public class GraphIngestionEngine implements Iterable<String[]> {
             return null;
         }
 
-        return new String[]{
-                fromDeleted ? null : this.sourceDataStore.getString(rowId, this.fromIdCubeIndex),
-                toDeleted ? null : this.sourceDataStore.getString(rowId, this.toIdCubeIndex)
+        return new int[]{
+                fromDeleted ? -1 : this.numericalRowStore.getInt(rowId, this.fromIdNumericIndex),
+                toDeleted ? -1 : this.numericalRowStore.getInt(rowId, this.toIdNumericIndex)
         };
+    }
+
+    String decodeNodeId(int encodedNodeId) {
+        return this.dictionaryRegistry[this.idDictionaryIndex].getValue(encodedNodeId);
+    }
+
+    synchronized Map<String, GraphNodeStat> getGraphStatistics() {
+        if (this.graphStatisticsVersion != this.graphVersion) {
+            this.graphStatisticsCache = buildGraphStatistics();
+            this.graphStatisticsVersion = this.graphVersion;
+        }
+
+        return copyGraphStatistics(this.graphStatisticsCache);
+    }
+
+    private Map<String, GraphNodeStat> buildGraphStatistics() {
+        Map<Integer, List<Integer>> adjacency = new LinkedHashMap<>();
+        Map<Integer, GraphNodeStat> encodedStatistics = new LinkedHashMap<>();
+        IntIterator rowIds = getValidRowIds();
+
+        while (rowIds.hasNext()) {
+            int[] nodeIds = getVisibleEncodedNodeIds(rowIds.next());
+            if (nodeIds == null) {
+                continue;
+            }
+
+            int fromNodeId = nodeIds[0];
+            int toNodeId = nodeIds[1];
+            if (fromNodeId != -1) {
+                encodedStatistics.computeIfAbsent(fromNodeId, ignored -> new GraphNodeStat());
+                adjacency.computeIfAbsent(fromNodeId, ignored -> new ArrayList<>());
+            }
+            if (toNodeId != -1) {
+                encodedStatistics.computeIfAbsent(toNodeId, ignored -> new GraphNodeStat());
+                adjacency.computeIfAbsent(toNodeId, ignored -> new ArrayList<>());
+            }
+            if (fromNodeId != -1 && toNodeId != -1) {
+                adjacency.get(fromNodeId).add(toNodeId);
+            }
+        }
+
+        populateDegreesWithBreadthFirstTraversal(adjacency, encodedStatistics);
+
+        Map<String, GraphNodeStat> statistics = new LinkedHashMap<>();
+        for (Map.Entry<Integer, GraphNodeStat> entry : encodedStatistics.entrySet()) {
+            statistics.put(decodeNodeId(entry.getKey()), entry.getValue());
+        }
+        return statistics;
+    }
+
+    private Map<String, GraphNodeStat> copyGraphStatistics(Map<String, GraphNodeStat> statistics) {
+        Map<String, GraphNodeStat> copy = new LinkedHashMap<>();
+        for (Map.Entry<String, GraphNodeStat> entry : statistics.entrySet()) {
+            GraphNodeStat stat = entry.getValue();
+            copy.put(entry.getKey(), new GraphNodeStat(stat.getOutDegree(), stat.getInDegree()));
+        }
+        return copy;
+    }
+
+    private void populateDegreesWithBreadthFirstTraversal(Map<Integer, List<Integer>> adjacency,
+                                                          Map<Integer, GraphNodeStat> statistics) {
+        Set<Integer> visited = new LinkedHashSet<>();
+        Queue<Integer> queue = new ArrayDeque<>();
+
+        for (Integer startNodeId : statistics.keySet()) {
+            if (!visited.add(startNodeId)) {
+                continue;
+            }
+
+            queue.add(startNodeId);
+            while (!queue.isEmpty()) {
+                Integer currentNodeId = queue.remove();
+                GraphNodeStat currentStat = statistics.get(currentNodeId);
+                for (Integer targetNodeId : adjacency.getOrDefault(currentNodeId, List.of())) {
+                    currentStat.incrementOutDegree();
+                    statistics.get(targetNodeId).incrementInDegree();
+                    if (visited.add(targetNodeId)) {
+                        queue.add(targetNodeId);
+                    }
+                }
+            }
+        }
     }
 
     private String[] getProjectedRowOrNull(int rowId) {
@@ -427,32 +490,62 @@ public class GraphIngestionEngine implements Iterable<String[]> {
     }
 
     private String[] buildMappedRow(int rowId, boolean fromDeleted, boolean toDeleted) {
-        List<String> mappedRow = new ArrayList<>(getMappedColumnCount());
-        appendNodeValues(mappedRow, rowId, fromDeleted, this.fromIdCubeIndex, this.fromLabelCubeIndex, this.fromAttrCubeIndices);
-        appendNodeValues(mappedRow, rowId, toDeleted, this.toIdCubeIndex, this.toLabelCubeIndex, this.toAttrCubeIndices);
+        List<String> mappedRow = new ArrayList<>(this.mappedColumnCount);
+        appendNodeValues(
+                mappedRow,
+                rowId,
+                fromDeleted,
+                this.fromIdCubeIndex != this.fromLabelCubeIndex,
+                this.fromIdNumericIndex,
+                this.fromLabelNumericIndex,
+                this.fromAttrNumericIndices
+        );
+        appendNodeValues(
+                mappedRow,
+                rowId,
+                toDeleted,
+                this.toIdCubeIndex != this.toLabelCubeIndex,
+                this.toIdNumericIndex,
+                this.toLabelNumericIndex,
+                this.toAttrNumericIndices
+        );
 
         boolean relationDeleted = fromDeleted || toDeleted;
-        for (int relationCubeIndex : this.relationCubeIndices) {
-            mappedRow.add(relationDeleted ? null : this.sourceDataStore.getString(rowId, relationCubeIndex));
+        for (int i = 0; i < this.relationNumericIndices.length; i++) {
+            mappedRow.add(relationDeleted ? null : decodeRelationValue(rowId, this.relationNumericIndices[i], i));
         }
 
         return mappedRow.toArray(new String[0]);
     }
 
     private String[] buildIteratorRow(int rowId, boolean fromDeleted, boolean toDeleted) {
-        List<String> mappedRow = new ArrayList<>(getIteratorMappedColumnCount());
-        appendIteratorNodeValues(mappedRow, rowId, fromDeleted, this.fromIdCubeIndex, this.fromLabelCubeIndex, this.fromAttrCubeIndices);
-        appendIteratorNodeValues(mappedRow, rowId, toDeleted, this.toIdCubeIndex, this.toLabelCubeIndex, this.toAttrCubeIndices);
+        List<String> mappedRow = new ArrayList<>(this.iteratorMappedColumnCount);
+        appendIteratorNodeValues(
+                mappedRow,
+                rowId,
+                fromDeleted,
+                this.fromIdNumericIndex,
+                this.fromLabelNumericIndex,
+                this.fromAttrNumericIndices
+        );
+        appendIteratorNodeValues(
+                mappedRow,
+                rowId,
+                toDeleted,
+                this.toIdNumericIndex,
+                this.toLabelNumericIndex,
+                this.toAttrNumericIndices
+        );
 
         boolean relationDeleted = fromDeleted || toDeleted;
-        for (int relationCubeIndex : this.relationCubeIndices) {
-            mappedRow.add(relationDeleted ? null : this.sourceDataStore.getString(rowId, relationCubeIndex));
+        for (int i = 0; i < this.relationNumericIndices.length; i++) {
+            mappedRow.add(relationDeleted ? null : decodeRelationValue(rowId, this.relationNumericIndices[i], i));
         }
 
         return mappedRow.toArray(new String[0]);
     }
 
-    private int getMappedColumnCount() {
+    private int computeMappedColumnCount() {
         return getNodeColumnCount(this.fromIdCubeIndex, this.fromLabelCubeIndex, this.fromAttrCubeIndices)
                 + getNodeColumnCount(this.toIdCubeIndex, this.toLabelCubeIndex, this.toAttrCubeIndices)
                 + this.relationCubeIndices.length;
@@ -463,7 +556,7 @@ public class GraphIngestionEngine implements Iterable<String[]> {
         return 1 + labelColumnCount + attrCubeIndices.length;
     }
 
-    private int getIteratorMappedColumnCount() {
+    private int computeIteratorMappedColumnCount() {
         return getIteratorNodeColumnCount(this.fromAttrCubeIndices)
                 + getIteratorNodeColumnCount(this.toAttrCubeIndices)
                 + this.relationCubeIndices.length;
@@ -476,54 +569,53 @@ public class GraphIngestionEngine implements Iterable<String[]> {
     private void appendNodeValues(List<String> mappedRow,
                                   int rowId,
                                   boolean nodeDeleted,
-                                  int idCubeIndex,
-                                  int labelCubeIndex,
-                                  int[] attrCubeIndices) {
-        boolean hasDistinctLabel = idCubeIndex != labelCubeIndex;
-
-        mappedRow.add(nodeDeleted ? null : this.sourceDataStore.getString(rowId, idCubeIndex));
-        if (hasDistinctLabel) {
-            mappedRow.add(nodeDeleted ? null : this.sourceDataStore.getString(rowId, labelCubeIndex));
+                                  boolean includeLabel,
+                                  int idNumericIndex,
+                                  int labelNumericIndex,
+                                  int[] attrNumericIndices) {
+        mappedRow.add(nodeDeleted ? null : decodeIdValue(rowId, idNumericIndex));
+        if (includeLabel) {
+            mappedRow.add(nodeDeleted ? null : decodeLabelValue(rowId, labelNumericIndex));
         }
 
-        for (int attrCubeIndex : attrCubeIndices) {
-            mappedRow.add(nodeDeleted ? null : this.sourceDataStore.getString(rowId, attrCubeIndex));
+        for (int i = 0; i < attrNumericIndices.length; i++) {
+            mappedRow.add(nodeDeleted ? null : decodeAttributeValue(rowId, attrNumericIndices[i], i));
         }
     }
 
     private void appendIteratorNodeValues(List<String> mappedRow,
                                           int rowId,
                                           boolean nodeDeleted,
-                                          int idCubeIndex,
-                                          int labelCubeIndex,
-                                          int[] attrCubeIndices) {
-        mappedRow.add(nodeDeleted ? null : this.sourceDataStore.getString(rowId, idCubeIndex));
-        mappedRow.add(nodeDeleted ? null : this.sourceDataStore.getString(rowId, labelCubeIndex));
+                                          int idNumericIndex,
+                                          int labelNumericIndex,
+                                          int[] attrNumericIndices) {
+        mappedRow.add(nodeDeleted ? null : decodeIdValue(rowId, idNumericIndex));
+        mappedRow.add(nodeDeleted ? null : decodeLabelValue(rowId, labelNumericIndex));
 
-        for (int attrCubeIndex : attrCubeIndices) {
-            mappedRow.add(nodeDeleted ? null : this.sourceDataStore.getString(rowId, attrCubeIndex));
+        for (int i = 0; i < attrNumericIndices.length; i++) {
+            mappedRow.add(nodeDeleted ? null : decodeAttributeValue(rowId, attrNumericIndices[i], i));
         }
     }
 
-    private void updateNodeAttributeIndex(int attributeIndex,
-                                          int[] numericRowBuffer,
-                                          int rowId) {
-        int nodeIndexAddress = 2 + attributeIndex;
-        int encodedFromAttr = numericRowBuffer[this.fromAttrNumericIndices[attributeIndex]];
-        int encodedToAttr = numericRowBuffer[this.toAttrNumericIndices[attributeIndex]];
-        updateIndex(this.fromInvertedIndexRegistry[nodeIndexAddress], encodedFromAttr, rowId);
-        updateIndex(this.toInvertedIndexRegistry[nodeIndexAddress], encodedToAttr, rowId);
+    private String decodeIdValue(int rowId, int numericIndex) {
+        return decodeValue(rowId, numericIndex, this.idDictionaryIndex);
     }
 
-    private void updateRelationIndex(int relationIndex, int[] numericRowBuffer, int rowId) {
-        updateIndex(
-                this.relationInvertedIndexRegistry[relationIndex],
-                numericRowBuffer[this.relationNumericIndices[relationIndex]],
-                rowId
-        );
+    private String decodeLabelValue(int rowId, int numericIndex) {
+        return decodeValue(rowId, numericIndex, this.labelDictionaryIndex);
     }
 
-    private static void updateIndex(InvertedIndexColumn indexColumn, int encodedValue, int rowId) {
-        indexColumn.add(encodedValue, rowId);
+    private String decodeAttributeValue(int rowId, int numericIndex, int attributeIndex) {
+        return decodeValue(rowId, numericIndex, this.attributeDictionaryIndices[attributeIndex]);
     }
+
+    private String decodeRelationValue(int rowId, int numericIndex, int relationIndex) {
+        return decodeValue(rowId, numericIndex, this.relationDictionaryIndices[relationIndex]);
+    }
+
+    private String decodeValue(int rowId, int numericIndex, int dictionaryIndex) {
+        int encodedValue = this.numericalRowStore.getInt(rowId, numericIndex);
+        return this.dictionaryRegistry[dictionaryIndex].getValue(encodedValue);
+    }
+
 }
