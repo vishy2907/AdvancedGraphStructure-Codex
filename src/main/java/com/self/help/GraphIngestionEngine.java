@@ -58,6 +58,17 @@ public class GraphIngestionEngine {
     private final RoaringBitmap deletedRowTo = new RoaringBitmap();
     private int ingestedRowCount;
 
+    /**
+     * Builds an ingestion engine for the supplied raw column store and mapping.
+     * The mapping is validated up front, and all source column positions,
+     * dictionary offsets, and inverted-index registries are precomputed so row
+     * ingestion does not need repeated column-name lookups.
+     *
+     * @param dataCube raw source store that owns the string columns
+     * @param spec graph mapping that identifies from-node, to-node, and relation columns
+     * @throws IllegalArgumentException when mapped columns are missing, attributes are mismatched,
+     *                                  or from/to node specs share source columns
+     */
     public GraphIngestionEngine(RawDataStore dataCube, MappingSpec spec) {
         validateSpec(dataCube, spec);
         this.sourceDataStore = dataCube;
@@ -219,6 +230,15 @@ public class GraphIngestionEngine {
         return newIndex;
     }
 
+    /**
+     * Encodes and indexes one raw row as a graph edge.
+     * Rows must be ingested in strict ascending order starting at {@code 0};
+     * the row id is used directly as the bitmap position for all indexes.
+     *
+     * @param rowId sequential row id to ingest
+     * @param dataCube raw store containing the row values
+     * @throws IllegalArgumentException when {@code rowId} is not the next expected row id
+     */
     public synchronized void ingest(int rowId, RawDataStore dataCube) {
         if (rowId != this.ingestedRowCount) {
             throw new IllegalArgumentException("Row ids must be ingested sequentially starting at 0.");
@@ -293,6 +313,13 @@ public class GraphIngestionEngine {
         this.deletedRowTo.add(rowId);
     }
 
+    /**
+     * Returns row ids that are still visible after tombstone projection.
+     * A row remains valid when at least one side of the edge is not deleted;
+     * rows deleted on both the from and to side are omitted.
+     *
+     * @return iterator over valid row ids in ascending order
+     */
     public synchronized IntIterator getValidRowIds() {
         RoaringBitmap validRowIds = new RoaringBitmap();
 
@@ -307,6 +334,15 @@ public class GraphIngestionEngine {
         return validRowIds.getIntIterator();
     }
 
+    /**
+     * Returns the mapped graph row for the supplied row id.
+     * Deleted node sides are projected as {@code null}; relation values are
+     * projected as {@code null} when either node side of the edge is deleted.
+     *
+     * @param rowId ingested row id to project
+     * @return mapped graph row, or {@code null} when the row id is outside the ingested range
+     *         or both node sides are deleted
+     */
     public synchronized String[] getRow(int rowId) {
         return getProjectedRowOrNull(rowId);
     }

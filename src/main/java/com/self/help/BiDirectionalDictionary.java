@@ -11,6 +11,13 @@ class BiDirectionalDictionary {
     // ID to String for UI Hydration (Index is the ID)
     private List<String> idToValue = new ArrayList<>();
 
+    /**
+     * Returns the dictionary id for a value, creating a new id when the value
+     * has not been seen before.
+     *
+     * @param value value to encode
+     * @return stable integer id for the value
+     */
     public synchronized int getOrEncode(String value) {
         return valueToId.computeIfAbsent(value, k -> {
             int id = idToValue.size();
@@ -19,14 +26,32 @@ class BiDirectionalDictionary {
         });
     }
 
+    /**
+     * Resolves a dictionary id back to its original value.
+     *
+     * @param id dictionary id
+     * @return original value stored for the id
+     * @throws IndexOutOfBoundsException when the id is outside the dictionary range
+     */
     public String getValue(int id) {
         return idToValue.get(id);
     }
 
+    /**
+     * Returns the number of unique values encoded by this dictionary.
+     *
+     * @return unique value count
+     */
     public int size() {
         return idToValue.size();
     }
 
+    /**
+     * Looks up an existing dictionary id without mutating the dictionary.
+     *
+     * @param name value to look up
+     * @return dictionary id, or {@code -1} when the value has not been encoded
+     */
     public int getIdIfExists(String name) {
         return valueToId.getOrDefault(name, -1);
     }
