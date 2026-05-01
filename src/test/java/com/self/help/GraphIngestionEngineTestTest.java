@@ -8,8 +8,10 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class GraphIngestionEngineTestTest {
 
@@ -214,6 +216,43 @@ class GraphIngestionEngineTestTest {
         assertEquals(new GraphNodeStat(1, 1), statistics.get("MUM-1"));
         assertEquals(new GraphNodeStat(0, 1), statistics.get("SAT-1"));
         assertNull(statistics.get("City"));
+    }
+
+    @Test
+    public void testNumericalRowStoreStoresEncodedRowsColumnWise() {
+        NumericalRowStore store = new NumericalRowStore(3, 1);
+
+        store.appendRow(0, new int[]{10, 20, 30});
+        store.appendRow(1, new int[]{11, 21, 31});
+
+        assertEquals(3, store.getColumnCount());
+        assertEquals(2, store.getRowCount());
+        assertEquals(21, store.getInt(1, 1));
+        assertArrayEquals(new int[]{10, 20, 30}, store.getRow(0));
+        assertThrows(IllegalArgumentException.class, () -> store.appendRow(3, new int[]{12, 22, 32}));
+    }
+
+    @Test
+    public void testGraphIngestionEnginePersistsEncodedRowsInNumericalRowStore() {
+        RawDataStore store = new RawDataStore(List.of("fromCity", "toCity", "medium"));
+        store.ingestRow(new String[]{"Mumbai", "Pune", "byRoad"});
+        store.ingestRow(new String[]{"Pune", "Nashik", "byTrain"});
+
+        NodeSpec fromCity = new NodeSpec("fromCity", null, null);
+        NodeSpec toCity = new NodeSpec("toCity", null, null);
+
+        MappingSpec spec = new MappingSpec(fromCity, toCity, List.of("medium"));
+        GraphIngestionEngine engine = new GraphIngestionEngine(store, spec);
+        for (int i = 0; i < store.getSize(); i++) {
+            engine.ingest(i, store);
+        }
+
+        NumericalRowStore numericalRowStore = engine.getNumericalRowStore();
+
+        assertEquals(3, numericalRowStore.getColumnCount());
+        assertEquals(2, numericalRowStore.getRowCount());
+        assertArrayEquals(new int[]{0, 1, 0}, numericalRowStore.getRow(0));
+        assertArrayEquals(new int[]{1, 2, 1}, numericalRowStore.getRow(1));
     }
 
     @Test

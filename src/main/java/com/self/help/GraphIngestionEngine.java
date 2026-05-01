@@ -60,6 +60,7 @@ public class GraphIngestionEngine implements Iterable<String[]> {
     private final InvertedIndexColumn[] relationInvertedIndexRegistry;
 
     private final int encodedColumnCount;
+    private final NumericalRowStore numericalRowStore;
     private final RawDataStore sourceDataStore;
     private final RoaringBitmap deletedRowFrom = new RoaringBitmap();
     private final RoaringBitmap deletedRowTo = new RoaringBitmap();
@@ -160,6 +161,7 @@ public class GraphIngestionEngine implements Iterable<String[]> {
         }
 
         this.encodedColumnCount = numericColumnIndexMap.size();
+        this.numericalRowStore = new NumericalRowStore(this.encodedColumnCount);
     }
 
     private static void validateSpec(RawDataStore dataCube, MappingSpec spec) {
@@ -255,8 +257,20 @@ public class GraphIngestionEngine implements Iterable<String[]> {
         int encodedToId = numericRowBuffer[this.toIdNumericIndex];
         int encodedFromLabel = numericRowBuffer[this.fromLabelNumericIndex];
         int encodedToLabel = numericRowBuffer[this.toLabelNumericIndex];
+        this.numericalRowStore.appendRow(rowId, numericRowBuffer);
         addIndexedRow(rowId, encodedFromId, encodedToId, encodedFromLabel, encodedToLabel, numericRowBuffer);
         this.ingestedRowCount++;
+    }
+
+    /**
+     * Returns the encoded numerical sidecar store maintained during ingestion.
+     * The store is row-id aligned with the raw data store and contains the same
+     * encoded values used to build dictionaries and inverted indexes.
+     *
+     * @return numerical row store for encoded graph rows
+     */
+    public NumericalRowStore getNumericalRowStore() {
+        return this.numericalRowStore;
     }
 
     private int[] encodeNumericRow(int rowId, RawDataStore dataCube) {
