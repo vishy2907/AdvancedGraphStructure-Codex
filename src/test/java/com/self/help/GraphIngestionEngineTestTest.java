@@ -6,6 +6,8 @@ import org.roaringbitmap.IntIterator;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.StringJoiner;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -102,6 +104,52 @@ class GraphIngestionEngineTestTest {
     }
 
     @Test
+    public void testGraphEngineIteratorReturnsAllRowsWhenNothingIsDeleted() {
+        RawDataStore store = new RawDataStore(List.of("fromCity", "toCity", "medium"));
+        List<String> expectedRows = new ArrayList<>();
+        List<String[]> inputRows = new ArrayList<>();
+
+        inputRows.add(new String[]{"Mumbai", "Nashik", "byRoad"});
+        inputRows.add(new String[]{"Nashik", "Dhule", "byRoad"});
+        inputRows.add(new String[]{"Dhule", "Jalgaon", "byRoad"});
+        inputRows.add(new String[]{"Mumbai", "Pune", "byTrain"});
+        inputRows.add(new String[]{"Pune", "Satara", "byRoad"});
+        inputRows.add(new String[]{"Satara", "Kolhapur", "byRoad"});
+        inputRows.add(new String[]{"Kolhapur", "Belagavi", "byRoad"});
+        inputRows.add(new String[]{"Pune", "Ahmednagar", "byRoad"});
+        inputRows.add(new String[]{"Ahmednagar", "Aurangabad", "byRoad"});
+        inputRows.add(new  String[]{"Aurangabad", "Jalna", "byRoad"});
+        inputRows.add(new  String[]{"Jalna", "Nanded", "byRoad"});
+        inputRows.add(new  String[]{"Nanded", "Yavatmal", "byRoad"});
+        inputRows.add(new  String[]{"Yavatmal", "Wardha", "byRoad"});
+        inputRows.add(new  String[]{"Wardha", "Nagpur", "byTrain"});
+
+        inputRows.forEach(row -> {
+            store.ingestRow(row);
+            expectedRows.add(toString(row));
+        });
+
+        NodeSpec fromCity = new NodeSpec("fromCity", null, null);
+        NodeSpec toCity = new NodeSpec("toCity", null, null);
+
+        MappingSpec spec = new MappingSpec(fromCity, toCity, List.of("medium"));
+        GraphIngestionEngine engine = new GraphIngestionEngine(store, spec);
+        for (int i = 0; i < store.getSize(); i++) {
+            engine.ingest(i, store);
+        }
+
+        GraphEngineIterator iterator = engine.iterator();
+        List<String> actualRows = new ArrayList<>();
+        while (iterator.hasNext()) {
+            String row = iterator.nextRowAsString();
+            System.out.println(row);
+            actualRows.add(row);
+        }
+
+        assertEquals(expectedRows, actualRows);
+    }
+
+    @Test
     public void testInvertedIndexColumnNullifiesEmptyBitmapAfterRemove() {
         InvertedIndexColumn indexColumn = new InvertedIndexColumn();
 
@@ -109,5 +157,9 @@ class GraphIngestionEngineTestTest {
         indexColumn.remove(3, 99);
 
         assertNull(indexColumn.getRowsForValueOrNull(3));
+    }
+
+    private String toString(String [] input) {
+        return Arrays.toString(input);
     }
 }
