@@ -381,6 +381,23 @@ public class GraphIngestionEngine implements Iterable<String[]> {
         return buildIteratorRow(rowId, fromDeleted, toDeleted);
     }
 
+    synchronized String[] getVisibleNodeIds(int rowId) {
+        if (rowId < 0 || rowId >= this.ingestedRowCount) {
+            return null;
+        }
+
+        boolean fromDeleted = this.deletedRowFrom.contains(rowId);
+        boolean toDeleted = this.deletedRowTo.contains(rowId);
+        if (fromDeleted && toDeleted) {
+            return null;
+        }
+
+        return new String[]{
+                fromDeleted ? null : this.sourceDataStore.getString(rowId, this.fromIdCubeIndex),
+                toDeleted ? null : this.sourceDataStore.getString(rowId, this.toIdCubeIndex)
+        };
+    }
+
     private String[] getProjectedRowOrNull(int rowId) {
         if (rowId < 0 || rowId >= this.ingestedRowCount) {
             return null;

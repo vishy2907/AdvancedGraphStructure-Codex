@@ -6,8 +6,7 @@ import org.roaringbitmap.IntIterator;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.StringJoiner;
-import java.util.stream.Collectors;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -147,6 +146,74 @@ class GraphIngestionEngineTestTest {
         }
 
         assertEquals(expectedRows, actualRows);
+    }
+
+    @Test
+    public void testGraphEngineIteratorBuildsGraphStatisticsWithBreadthFirstTraversal() {
+        RawDataStore store = new RawDataStore(List.of("fromCity", "toCity", "medium"));
+        store.ingestRow(new String[]{"Mumbai", "Nashik", "byRoad"});
+        store.ingestRow(new String[]{"Mumbai", "Pune", "byTrain"});
+        store.ingestRow(new String[]{"Nashik", "Dhule", "byRoad"});
+        store.ingestRow(new String[]{"Pune", "Satara", "byRoad"});
+        store.ingestRow(new String[]{"Satara", "Kolhapur", "byRoad"});
+
+        NodeSpec fromCity = new NodeSpec("fromCity", null, null);
+        NodeSpec toCity = new NodeSpec("toCity", null, null);
+
+        MappingSpec spec = new MappingSpec(fromCity, toCity, List.of("medium"));
+        GraphIngestionEngine engine = new GraphIngestionEngine(store, spec);
+        for (int i = 0; i < store.getSize(); i++) {
+            engine.ingest(i, store);
+        }
+
+        Map<String, GraphNodeStat> statistics = engine.iterator().getGraphStatistics();
+
+        assertEquals(new GraphNodeStat(2, 0), statistics.get("Mumbai"));
+        assertEquals(new GraphNodeStat(1, 1), statistics.get("Nashik"));
+        assertEquals(new GraphNodeStat(1, 1), statistics.get("Pune"));
+        assertEquals(new GraphNodeStat(0, 1), statistics.get("Dhule"));
+        assertEquals(new GraphNodeStat(1, 1), statistics.get("Satara"));
+        assertEquals(new GraphNodeStat(0, 1), statistics.get("Kolhapur"));
+    }
+
+    @Test
+    public void testGraphEngineIteratorKeepsDifferentNodeIdsWithSameLabelDistinct() {
+        RawDataStore store = new RawDataStore(List.of("fromCityId", "fromCityLabel", "toCityId", "toCityLabel", "medium"));
+        store.ingestRow(new String[]{"PUNE-1", "Pune", "MUM-1", "Mumbai", "byRoad"});
+        store.ingestRow(new String[]{"PUNE-2", "Pune", "SAT-1", "Satara", "byRoad"});
+        store.ingestRow(new String[]{"MUM-1", "Mumbai", "PUNE-2", "Pune", "byTrain"});
+
+        NodeSpec fromCity = new NodeSpec("fromCityId", "fromCityLabel", null);
+        NodeSpec toCity = new NodeSpec("toCityId", "toCityLabel", null);
+
+        MappingSpec spec = new MappingSpec(fromCity, toCity, List.of("medium"));
+        GraphIngestionEngine engine = new GraphIngestionEngine(store, spec);
+        for (int i = 0; i < store.getSize(); i++) {
+            engine.ingest(i, store);
+        }
+
+        GraphEngineIterator iterator = engine.iterator();
+        List<String> rows = new ArrayList<>();
+        while (iterator.hasNext()) {
+            rows.add(iterator.nextRowAsString());
+        }
+
+        assertEquals(
+                List.of(
+                        "[PUNE-1, Pune, MUM-1, Mumbai, byRoad]",
+                        "[PUNE-2, Pune, SAT-1, Satara, byRoad]",
+                        "[MUM-1, Mumbai, PUNE-2, Pune, byTrain]"
+                ),
+                rows
+        );
+
+        Map<String, GraphNodeStat> statistics = engine.iterator().getGraphStatistics();
+        assertEquals(4, statistics.size());
+        assertEquals(new GraphNodeStat(1, 0), statistics.get("PUNE-1"));
+        assertEquals(new GraphNodeStat(1, 1), statistics.get("PUNE-2"));
+        assertEquals(new GraphNodeStat(1, 1), statistics.get("MUM-1"));
+        assertEquals(new GraphNodeStat(0, 1), statistics.get("SAT-1"));
+        assertNull(statistics.get("City"));
     }
 
     @Test
