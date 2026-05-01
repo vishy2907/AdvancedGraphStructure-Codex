@@ -19,7 +19,7 @@ import java.util.Set;
  * encodes mapped values and updates RoaringBitmap-backed inverted indexes while
  * keeping the legacy {@link RawDataStore} as the source for row projection.
  */
-public class GraphIngestionEngine {
+public class GraphIngestionEngine implements Iterable<String[]> {
 
     // ==========================================
     // PHASE 1: PRE-COMPUTED DATACUBE INDICES
@@ -339,6 +339,19 @@ public class GraphIngestionEngine {
         }
 
         return validRowIds.getIntIterator();
+    }
+
+    /**
+     * Creates a row iterator over the currently valid graph rows.
+     * The returned iterator is backed by {@link #getValidRowIds()} and resolves
+     * row ids through {@link #getRow(int)}, so fully deleted rows are skipped
+     * and each returned value is the full projected row.
+     *
+     * @return custom graph engine iterator over projected rows
+     */
+    @Override
+    public GraphEngineIterator iterator() {
+        return new GraphEngineIterator(this);
     }
 
     /**
