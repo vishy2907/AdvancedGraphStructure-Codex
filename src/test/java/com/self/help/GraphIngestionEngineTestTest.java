@@ -126,7 +126,7 @@ class GraphIngestionEngineTestTest {
 
         inputRows.forEach(row -> {
             store.ingestRow(row);
-            expectedRows.add(toString(row));
+            expectedRows.add(toIteratorString(row));
         });
 
         NodeSpec fromCity = new NodeSpec("fromCity", null, null);
@@ -159,7 +159,7 @@ class GraphIngestionEngineTestTest {
         assertNull(indexColumn.getRowsForValueOrNull(3));
     }
 
-    private String toString(String [] input) {
-        return Arrays.toString(input);
+    private String toIteratorString(String[] input) {
+        return Arrays.toString(new String[]{input[0], input[0], input[1], input[1], input[2]});
     }
 }

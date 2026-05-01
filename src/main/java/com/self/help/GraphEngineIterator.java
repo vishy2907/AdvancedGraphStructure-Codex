@@ -9,7 +9,8 @@ import java.util.NoSuchElementException;
 /**
  * Iterates over the currently valid projected rows of a {@link GraphIngestionEngine}.
  * The iterator starts from the engine's valid row-id snapshot and resolves each
- * row through the engine, so fully deleted rows are not returned to callers.
+ * row through the engine's iterator projection, so fully deleted rows are not
+ * returned and node id/label columns are always present.
  */
 public class GraphEngineIterator implements Iterator<String[]> {
     private final GraphIngestionEngine engine;
@@ -87,7 +88,7 @@ public class GraphEngineIterator implements Iterator<String[]> {
 
         while (this.validRowIds.hasNext()) {
             int rowId = this.validRowIds.next();
-            String[] row = this.engine.getRow(rowId);
+            String[] row = this.engine.getIteratorRow(rowId);
             if (row != null) {
                 this.preparedRowId = rowId;
                 this.preparedRow = row;

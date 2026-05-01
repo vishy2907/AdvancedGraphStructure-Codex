@@ -344,8 +344,8 @@ public class GraphIngestionEngine implements Iterable<String[]> {
     /**
      * Creates a row iterator over the currently valid graph rows.
      * The returned iterator is backed by {@link #getValidRowIds()} and resolves
-     * row ids through {@link #getRow(int)}, so fully deleted rows are skipped
-     * and each returned value is the full projected row.
+     * row ids through the iterator projection, so fully deleted rows are skipped
+     * and each returned value always includes node id and node label columns.
      *
      * @return custom graph engine iterator over projected rows
      */
@@ -365,6 +365,20 @@ public class GraphIngestionEngine implements Iterable<String[]> {
      */
     public synchronized String[] getRow(int rowId) {
         return getProjectedRowOrNull(rowId);
+    }
+
+    synchronized String[] getIteratorRow(int rowId) {
+        if (rowId < 0 || rowId >= this.ingestedRowCount) {
+            return null;
+        }
+
+        boolean fromDeleted = this.deletedRowFrom.contains(rowId);
+        boolean toDeleted = this.deletedRowTo.contains(rowId);
+        if (fromDeleted && toDeleted) {
+            return null;
+        }
+
+        return buildIteratorRow(rowId, fromDeleted, toDeleted);
     }
 
     private String[] getProjectedRowOrNull(int rowId) {
@@ -394,6 +408,19 @@ public class GraphIngestionEngine implements Iterable<String[]> {
         return mappedRow.toArray(new String[0]);
     }
 
+    private String[] buildIteratorRow(int rowId, boolean fromDeleted, boolean toDeleted) {
+        List<String> mappedRow = new ArrayList<>(getIteratorMappedColumnCount());
+        appendIteratorNodeValues(mappedRow, rowId, fromDeleted, this.fromIdCubeIndex, this.fromLabelCubeIndex, this.fromAttrCubeIndices);
+        appendIteratorNodeValues(mappedRow, rowId, toDeleted, this.toIdCubeIndex, this.toLabelCubeIndex, this.toAttrCubeIndices);
+
+        boolean relationDeleted = fromDeleted || toDeleted;
+        for (int relationCubeIndex : this.relationCubeIndices) {
+            mappedRow.add(relationDeleted ? null : this.sourceDataStore.getString(rowId, relationCubeIndex));
+        }
+
+        return mappedRow.toArray(new String[0]);
+    }
+
     private int getMappedColumnCount() {
         return getNodeColumnCount(this.fromIdCubeIndex, this.fromLabelCubeIndex, this.fromAttrCubeIndices)
                 + getNodeColumnCount(this.toIdCubeIndex, this.toLabelCubeIndex, this.toAttrCubeIndices)
@@ -403,6 +430,16 @@ public class GraphIngestionEngine implements Iterable<String[]> {
     private int getNodeColumnCount(int idCubeIndex, int labelCubeIndex, int[] attrCubeIndices) {
         int labelColumnCount = idCubeIndex == labelCubeIndex ? 0 : 1;
         return 1 + labelColumnCount + attrCubeIndices.length;
+    }
+
+    private int getIteratorMappedColumnCount() {
+        return getIteratorNodeColumnCount(this.fromAttrCubeIndices)
+                + getIteratorNodeColumnCount(this.toAttrCubeIndices)
+                + this.relationCubeIndices.length;
+    }
+
+    private int getIteratorNodeColumnCount(int[] attrCubeIndices) {
+        return 2 + attrCubeIndices.length;
     }
 
     private void appendNodeValues(List<String> mappedRow,
@@ -417,6 +454,20 @@ public class GraphIngestionEngine implements Iterable<String[]> {
         if (hasDistinctLabel) {
             mappedRow.add(nodeDeleted ? null : this.sourceDataStore.getString(rowId, labelCubeIndex));
         }
+
+        for (int attrCubeIndex : attrCubeIndices) {
+            mappedRow.add(nodeDeleted ? null : this.sourceDataStore.getString(rowId, attrCubeIndex));
+        }
+    }
+
+    private void appendIteratorNodeValues(List<String> mappedRow,
+                                          int rowId,
+                                          boolean nodeDeleted,
+                                          int idCubeIndex,
+                                          int labelCubeIndex,
+                                          int[] attrCubeIndices) {
+        mappedRow.add(nodeDeleted ? null : this.sourceDataStore.getString(rowId, idCubeIndex));
+        mappedRow.add(nodeDeleted ? null : this.sourceDataStore.getString(rowId, labelCubeIndex));
 
         for (int attrCubeIndex : attrCubeIndices) {
             mappedRow.add(nodeDeleted ? null : this.sourceDataStore.getString(rowId, attrCubeIndex));
